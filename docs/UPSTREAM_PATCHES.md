@@ -152,3 +152,20 @@ popup 直接 fetch `http://127.0.0.1:11436` 合法）。
 | ② | `SiteAdapter` 的阅读方法 | e-hentai 主世界桥（Phase 5，探针已定案） |
 | ③ | 设置模型 | `AppSettings` 收敛为判别联合；`targetLang` 固定 `zh-CHS` |
 | — | 删除谷歌翻译 | 约 80 行（手册 §2.2） |
+
+---
+
+## 2026-10-03 · 删除式简化（回退到 v0.1.4 基线后的第一笔，用户拍板）
+
+> 原则转向：**不再往翻页路径上加东西，改为删**。闪屏的根源 = 翻页路径上叠的机制太多
+> （M3 桩探针 + 还原守卫协议 + 落盘读取挡在关键路径上）。
+
+| 删除 | 内容 |
+|---|---|
+| M3 桩探针接线 | `index.ts` 探针块（72 行）+ `core/scheduler/prefetchWindowProbe.ts`（225 行）+ 其测试（135 行）；注意用户 localStorage 的 `mt-prefetch-probe` 残留已无效果 |
+| 还原守卫协议 | `cacheRestoreAttempted` + `releaseRestoreGuard` + sync 卸载释放 + pageshow 释放 → 一个 `cacheWarmStarted` Set 替代 |
+| 翻页关键路径上的落盘读取 | `restoreFromCache` 变同步：只查内存 Map；落盘（IndexedDB）改**后台预热**（每会话每页一次，命中后经 applyStateImage 贴图——原图先画、译图后到） |
+
+**翻页路径最终形态**：原生行为 + 内存查一次 Map → 原图画完 → 译图已解码 → 一帧换上。
+贴图时机（等原图落定 + decode）唯一出口 = `TranslatorCore.applyStateImage`。
+shinobu 提交 `91949a5`（分支 m3-baseline）。
