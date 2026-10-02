@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "dmb M5 flash diag probe",
+  "version": "0.1.0",
+  "description": "M5 翻页闪屏诊断：layout-shift 量化视觉抖动 + 站点函数调用观测（包装透传）+ img#img src 变化 + api.php 全流量（含 POST body 页号）+ F12 取证指令自动集成。只观测，不拦截。",
+  "minimum_chrome_version": "111",
+  "permissions": ["downloads", "storage", "webRequest", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["*://*.exhentai.org/*", "*://*.e-hentai.org/*"],
+      "js": ["content-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.exhentai.org/*", "*://*.e-hentai.org/*"],
+      "js": ["content-isolated.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html" }
+}
