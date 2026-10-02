@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "dmb probe (Phase 1)",
+  "version": "1.2.0",
+  "description": "临时探针（纯被动）：监听 XHR/fetch 抓 showpage 响应与图片 URL，不改写站点函数。验完即删。",
+  "permissions": ["downloads", "storage"],
+  "host_permissions": [
+    "*://e-hentai.org/*",
+    "*://*.e-hentai.org/*",
+    "*://exhentai.org/*",
+    "*://*.exhentai.org/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://e-hentai.org/*",
+        "*://*.e-hentai.org/*",
+        "*://exhentai.org/*",
+        "*://*.exhentai.org/*"
+      ],
+      "js": ["content-main.js"],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "*://e-hentai.org/*",
+        "*://*.e-hentai.org/*",
+        "*://exhentai.org/*",
+        "*://*.exhentai.org/*"
+      ],
+      "js": ["content-isolated.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "action": { "default_popup": "popup.html", "default_title": "dmb probe" }
+}

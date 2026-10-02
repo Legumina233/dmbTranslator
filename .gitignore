@@ -1,0 +1,37 @@
+# ── 依赖 / 构建产物 ─────────────────────────────
+node_modules/
+dist/
+dist-*/
+build/
+
+# ── 上游：自带 .git，作为 diff 基准；外层不追踪其内容 ──
+shinobu/
+
+# ── 重资产：不入库，用软链或配置指向别处 ──────────
+public/models/
+models/
+.conda/
+
+# ── 探针报告：含站点 showkey 等会话凭据，不入库 ──
+dmb-probe-report*.json
+
+# ── 运行期 ────────────────────────────────────
+logs/
+.state/
+.cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ── 上游 pin 标记（保留，用于 diff 对账） ────────
+!shinobu/.upstream*
+
+# ── 编辑器 / 系统 ─────────────────────────────
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+
+# 运行时状态（管家开关等），不入库
+run/

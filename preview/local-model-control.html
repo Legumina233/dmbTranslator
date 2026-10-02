@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>本地模型控制 · 布局预览</title>
+<!--
+  这是【开发用的布局预览页】，不是扩展的一部分，也不会被打进扩展产物。
+  它直接 <link> 扩展真实的 popup/styles.css，把组件在各种状态下的 DOM 照抄一遍，
+  用来在【不重载扩展】的情况下检查排版（间距、换行、按钮态）。
+  改完 popup UI 后刷新本页即可对照。
+-->
+<link rel="stylesheet" href="../shinobu/apps/extension/src/popup/styles.css">
+<style>
+  body { margin: 0; padding: 20px; background: #eeedea; display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .frame { display: flex; flex-direction: column; gap: 6px; }
+  .frame > b { font: 500 12px system-ui; color: #55554f; }
+</style>
+</head>
+<body>
+
+<!-- ① 两个服务都在跑 -->
+<div class="frame">
+  <b>① 两个服务都在跑</b>
+  <main class="popup"><div class="popup-body"><section class="panel panel-llm">
+    <div class="field">
+      <span class="field-label">本地服务</span>
+      <div class="local-row">
+        <button class="local-toggle local-toggle-on" type="button" role="switch" aria-checked=" true">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot local-dot-ok"></span>
+
+                <span class="local-row-text">运行中</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">Ollama</span>
+      <div class="local-row">
+        <button class="local-toggle local-toggle-on" type="button" role="switch" aria-checked=" true">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot local-dot-ok"></span>
+
+                <span class="local-row-text">运行中</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">本地模型</span>
+      <div class="select-root" data-open="false" data-placement="down">
+        <button class="select-trigger" type="button">
+          <span class="select-value">sakura-14b-qwen3-v1.5:latest · 已加载</span>
+          <span class="select-chevron"></span>
+        </button>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">模型状态</span>
+            <span class="local-row-text">已加载</span>
+    </div>
+    <div class="field">
+      <span class="field-label">显存占用</span>
+            <span class="local-row-text">9715 MB</span>
+    </div>
+    <div class="local-actions">
+      <button class="oauth-action" type="button" disabled>加载模型</button>
+      <button class="oauth-action" type="button">卸载模型</button>
+    </div>
+  </section></div></main>
+</div>
+
+<!-- ② dmb_server 在跑、Ollama 没跑 -->
+<div class="frame">
+  <b>② Ollama 未运行（开关未勾）</b>
+  <main class="popup"><div class="popup-body"><section class="panel panel-llm">
+    <div class="field">
+      <span class="field-label">本地服务</span>
+      <div class="local-row">
+        <button class="local-toggle local-toggle-on" type="button" role="switch" aria-checked=" true">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot local-dot-ok"></span>
+
+                <span class="local-row-text">运行中</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">Ollama</span>
+      <div class="local-row">
+        <button class="local-toggle" type="button" role="switch" aria-checked=" false">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot"></span>
+
+                <span class="local-row-text">未运行</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">本地模型</span>
+      <div class="select-root" data-open="false" data-placement="down">
+        <button class="select-trigger" type="button">
+          <span class="select-value">请选择模型</span>
+          <span class="select-chevron"></span>
+        </button>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">模型状态</span>
+            <span class="local-row-text">尚未选择模型</span>
+    </div>
+    <div class="field">
+      <span class="field-label">显存占用</span>
+            <span class="local-row-text">—</span>
+    </div>
+    <div class="local-actions">
+      <button class="oauth-action" type="button" disabled>加载模型</button>
+      <button class="oauth-action" type="button" disabled>卸载模型</button>
+    </div>
+  </section></div></main>
+</div>
+
+<!-- ③ 首轮探活中 -->
+<div class="frame">
+  <b>③ 首轮探活中（正在连接…）</b>
+  <main class="popup"><div class="popup-body"><section class="panel panel-llm">
+    <div class="field">
+      <span class="field-label">本地服务</span>
+      <div class="local-row">
+        <button class="local-toggle" type="button" role="switch" aria-checked=" false">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot"></span>
+
+                <span class="local-row-text">正在连接…</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">Ollama</span>
+      <div class="local-row">
+        <button class="local-toggle" type="button" role="switch" aria-checked=" false">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot"></span>
+
+                <span class="local-row-text">正在连接…</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">本地模型</span>
+      <div class="select-root" data-open="false" data-placement="down">
+        <button class="select-trigger" type="button">
+          <span class="select-value">请选择模型</span>
+          <span class="select-chevron"></span>
+        </button>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">模型状态</span>
+            <span class="local-row-text">—</span>
+    </div>
+    <div class="field">
+      <span class="field-label">显存占用</span>
+            <span class="local-row-text">—</span>
+    </div>
+    <div class="local-actions">
+      <button class="oauth-action" type="button" disabled>加载模型</button>
+      <button class="oauth-action" type="button" disabled>卸载模型</button>
+    </div>
+  </section></div></main>
+</div>
+
+<!-- ④ 加载中 -->
+<div class="frame">
+  <b>④ 加载中（按钮状态）</b>
+  <main class="popup"><div class="popup-body"><section class="panel panel-llm">
+    <div class="field">
+      <span class="field-label">本地服务</span>
+      <div class="local-row">
+        <button class="local-toggle local-toggle-on" type="button" role="switch" aria-checked=" true">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot local-dot-ok"></span>
+
+                <span class="local-row-text">运行中</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">Ollama</span>
+      <div class="local-row">
+        <button class="local-toggle local-toggle-on" type="button" role="switch" aria-checked=" true">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot local-dot-ok"></span>
+
+                <span class="local-row-text">运行中</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">本地模型</span>
+      <div class="select-root" data-open="false" data-placement="down">
+        <button class="select-trigger" type="button">
+          <span class="select-value">sakura-14b-qwen3-v1.5:latest</span>
+          <span class="select-chevron"></span>
+        </button>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">模型状态</span>
+            <span class="local-row-text">未加载</span>
+    </div>
+    <div class="field">
+      <span class="field-label">显存占用</span>
+            <span class="local-row-text">—</span>
+    </div>
+    <div class="local-actions">
+      <button class="oauth-action" type="button" disabled>加载中…</button>
+      <button class="oauth-action" type="button" disabled>卸载模型</button>
+    </div>
+    <div class="local-feedback status-saving">加载中：sakura-14b-qwen3-v1.5:latest …</div>
+  </section></div></main>
+</div>
+
+<!-- ⑤ 成功反馈 -->
+<div class="frame">
+  <b>⑤ 加载成功反馈</b>
+  <main class="popup"><div class="popup-body"><section class="panel panel-llm">
+    <div class="field">
+      <span class="field-label">本地服务</span>
+      <div class="local-row">
+        <button class="local-toggle local-toggle-on" type="button" role="switch" aria-checked=" true">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot local-dot-ok"></span>
+
+                <span class="local-row-text">运行中</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">Ollama</span>
+      <div class="local-row">
+        <button class="local-toggle local-toggle-on" type="button" role="switch" aria-checked=" true">
+          <span class="local-toggle-knob"></span>
+        </button>
+
+                <span class="local-dot local-dot-ok"></span>
+
+                <span class="local-row-text">运行中</span>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">本地模型</span>
+      <div class="select-root" data-open="false" data-placement="down">
+        <button class="select-trigger" type="button">
+          <span class="select-value">sakura-14b-qwen3-v1.5:latest · 已加载</span>
+          <span class="select-chevron"></span>
+        </button>
+      </div>
+    </div>
+    <div class="field">
+      <span class="field-label">模型状态</span>
+            <span class="local-row-text">已加载</span>
+    </div>
+    <div class="field">
+      <span class="field-label">显存占用</span>
+            <span class="local-row-text">9715 MB</span>
+    </div>
+    <div class="local-actions">
+      <button class="oauth-action" type="button" disabled>加载模型</button>
+      <button class="oauth-action" type="button">卸载模型</button>
+    </div>
+    <div class="local-feedback status-success">已加载（8.0s） · 已先卸载 sakura-14b:latest</div>
+  </section></div></main>
+</div>
+
+</body>
+</html>

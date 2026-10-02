@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font: 13px/1.6 system-ui, sans-serif; width: 260px; margin: 0; padding: 14px; color: #222; }
+    h1 { font-size: 14px; margin: 0 0 8px; font-weight: 500; }
+    .n { font-size: 22px; font-weight: 500; margin: 6px 0; }
+    button { width: 100%; padding: 8px; margin-top: 8px; font: inherit; cursor: pointer;
+             border: 1px solid #bbb; border-radius: 8px; background: #fff; }
+    button:hover { border-color: #666; }
+    .hint { color: #777; font-size: 12px; margin-top: 10px; }
+    .sec { margin-top: 4px; padding-top: 8px; border-top: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <h1>dmb Phase 1 探针</h1>
+  <div>已采集事件：<span class="n" id="count">-</span></div>
+  <button id="refresh">刷新计数</button>
+  <div class="sec">
+    <button id="export">导出报告 JSON</button>
+    <button id="clear">清空采集</button>
+  </div>
+  <div class="hint">请在 <b>e-hentai 画廊 / MPV 页面</b>打开后再点「导出报告」，把下载到的
+  <code>dmb-probe-report.json</code> 发回给我。</div>
+  <script src="popup.js"></script>
+</body>
+</html>
