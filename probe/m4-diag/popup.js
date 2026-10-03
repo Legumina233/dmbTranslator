@@ -41,6 +41,38 @@
     return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
   }
 
+  function renderStacking(stacking) {
+    if (!stacking) return;
+    var o = stacking.overlay || {};
+    var a = stacking.anchor || {};
+    $('stOverlay').textContent = o.exists
+      ? '存在（z=' + o.zIndex + '，' + o.display + '）' : '不存在';
+    $('stAnchor').textContent = a.exists
+      ? '存在（z=' + a.zIndex + '，' + a.display + '）' : '不存在';
+    $('stAnchorContent').textContent = stacking.anchorEmpty
+      ? '空壳（UI 已被卸载 → 按钮没挂，不是被盖）'
+      : (a.exists ? '有内容（' + a.childCount + ' 子节点）' : '—');
+    $('stOverlayRect').textContent = o.exists && o.rect
+      ? ('x' + o.rect.x + ' y' + o.rect.y + ' ' + o.rect.w + '×' + o.rect.h) : '—';
+    $('stAnchorRect').textContent = a.exists && a.rect
+      ? ('x' + a.rect.x + ' y' + a.rect.y + ' ' + a.rect.w + '×' + a.rect.h) : '—';
+    $('stVerdict').textContent = stacking.verdict || '—';
+    var chainsEl = $('stChains');
+    var lines = [];
+    if (o.exists && o.contextChain && o.contextChain.length > 0) {
+      lines.push('画框祖先上下文：' + JSON.stringify(o.contextChain));
+    }
+    if (a.exists && a.contextChain && a.contextChain.length > 0) {
+      lines.push('按钮祖先上下文：' + JSON.stringify(a.contextChain));
+    }
+    if (lines.length > 0) {
+      chainsEl.textContent = lines.join('\n');
+      chainsEl.classList.remove('hidden');
+    } else {
+      chainsEl.classList.add('hidden');
+    }
+  }
+
   function render(payload) {
     lastPayload = payload;
     if (payload.error) {
@@ -116,6 +148,7 @@
       });
       tbody.appendChild(tr);
     }
+    renderStacking(payload.stacking);
   }
 
   function refresh() {
