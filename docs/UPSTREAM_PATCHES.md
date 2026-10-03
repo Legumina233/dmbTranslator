@@ -231,3 +231,61 @@ typecheck 仅剩 4 条**既有**测试类型错误（`pageScheduler` ×1、`reta
 `.panel input[type='number'] { width: 100% }`（特异性 0-2-1）压过了单类名 `.cache-limit-input`（0-1-0）。
 用 `.panel input[type='number'].cache-limit-input`（0-3-1）压回 64px，不引 `!important`。
 shinobu `f4c5b9c`。
+
+---
+
+## 译图只存内存 + 常驻画框（2026-10-03，用户拍板）
+
+三件事一起做，因为它们是同一个问题的三面：**翻页时"空白 → 出图"那一下**。
+
+### 1. 拆掉「等原图」闸门
+
+被删掉的规则来自 **`5eb38b2`（2026-10-03 02:39）**：`TranslatorCore.applyStateImage` 里
+「原图 `load`/`error` 落定前绝不贴译图」。它当时的理由成立 —— 改写站点 `<img>` 的 `src`
+会顶掉正在加载的原图，于是"先空白再出图"（v0.1.4 起翻回已译页必闪的机理）。
+
+**前提现在不成立了**：画框模式下我们根本不碰站点 `<img>`，那几秒等待纯属白等 ——
+它等的那几秒，正是屏幕上空白的那几秒。预解码（`new Image()` + `decode()`）保留，
+只是不再当闸门用。
+
+### 2. 常驻画框（新增 `content/core/overlay/translatedImageOverlay.ts`）
+
+站点 `<img>` 的 `src` **永不被改写**。译图画在我们自己的一张常驻 `<img>` 上：
+
+- 挂在 `document.body`，**不挂站点容器** → 站点重建图片 DOM 也动不到它（这是"常驻"的全部意义）；
+- 绝对定位，位置按站点图 `getBoundingClientRect()` 换算（用 `offsetParent` 的矩形做原点，
+  不假设 body 在文档原点），跟随 `resize` + `ResizeObserver`；
+- `pointer-events:none` → 站点"点图片翻下一页"的交互照旧；
+- **不省原本的请求**：站点自己的原图请求照发不误，我们只是不等它（省请求是 M4 的事）；
+- 站点 `SiteAdapter` 新增可选 `applyOverlayImage(target, url | null)`，`url === null` = 隐身让原图露出。
+  存在此方法即视为已接管贴图，不再走改 `src` 那条路（其它站点行为不变）。
+- 浮层按钮层级从 `z-index:20` 提到 `2147483001` —— 画框是 `2147483000` 且盖住整张图，
+  不抬按钮就会被画框盖住。
+
+### 3. 译图落盘暂时关闭
+
+`localPipelineClient.ts` 加单一开关 `TRANSLATION_CACHE_PERSISTENCE_ENABLED = false`：
+**读一律 miss、写一律 `false`**。读写两个关口都在这一处，恢复只改这一个常量。
+动机：最初要的只是"翻回去不用重译"，不是"重启浏览器后还在"；落盘那条跨进程链路
+（内容脚本 → 后台 → offscreen → IndexedDB）在翻页时反而是负担。
+
+**因此缓存管理改走另一条路**：弹窗 → 后台 → `chrome.tabs.sendMessage` → 内容脚本，
+新增 `mt:memory-cache`（`status` / `limit` / `clear`）直接操作 `PhotoStateStore`。
+`MemoryCacheResult.reached` 用来区分"没连上内容脚本"和"缓存确实是空的" ——
+弹窗在 `reached:false` 时显示"未连接"，**不显示 0**。
+
+### 内存层的占用口径
+
+`PhotoStateStore` **按条数管，不按字节**（一张译图一条，每张一条 blob URL + 一份解码位图）。
+新增 `size()` / `limit()` / `setLimit()` / `clear()`；`setLimit` 调小**立刻裁**
+（淘汰只在写入时发生）。UI 的"译图缓存 N 张"现在管的是**内存条数**，显示 `现存 / 上限`。
+
+**验证**：171 文件 / **1422 条全绿**（新增 10 条：内存层 size/setLimit/clear 4 条 + 画框 6 条 + 路由 1 条）；
+`tsc` 源码零错误；`typecheck:tests` 仅剩 4 条**既有**测试类型错误（同前，登记不修）；
+架构绿；chromium 与 firefox 产物均已重建并核对标记（`mtTranslatedOverlay` / `mt:memory-cache`）。
+
+**已知留白（如实记）**：
+- 画框用**假 DOM** 做单测（测试环境是 node，无 jsdom）；真实浏览器下的对位/层级/缩放需真机验。
+- 新开的页面用的是默认上限 200，弹窗打开时会把设置里的上限**推一次**给当前标签页
+  （内容脚本拿不到 settings）—— 不打开弹窗时新页面就是 200。
+- 清空后当前页会重新 `ensure` 出一条空状态，条数显示 1（那是"槽位"，不是译图）。
