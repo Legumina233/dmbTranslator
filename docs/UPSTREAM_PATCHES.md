@@ -177,3 +177,22 @@ shinobu 提交 `91949a5`（分支 m3-baseline）。
 重做预载时的纪律（本轮学费换来的）：
 ① 先插桩测量、再动代码；② 一次只改一处、每步真机验证；③ 主世界只做被动观察，
 **任何站点函数调用/劫持前先 toString() 读源码**；④ 每个新机制必须带一键开关和探针判定口径。
+
+### 2026-10-03 · 回退到「03:00 基线」+ 该基线上的奥卡姆审查（shinobu 10edd48）
+
+**回退目标（用户指定「凌晨 3 点 01 分左右提交」）**：外层 `5372955`（10-03 03:00:45，
+标题即「用户确认 91949a5 = 稳定基线」）；shinobu `91949a5`（10-03 02:56）。
+**注意**：`v0.1.4.1` 指向的 `076056a`（03:18）比该基线**更新** —— 用户要的是基线本身，不是它。
+
+回退前状态全部保全到分支（什么都不丢）：
+shinobu `archive/occam-076056a`、`wip/prefetch-runner`；外层 `archive/round3-occam`、`m4-docs-archive`。
+
+**该基线上独立复核出的 3 项多余（逐项自有论证，非照抄）**：
+
+| 项 | 论证 | 连带效果 |
+|---|---|---|
+| 删 M0 主世界观察尖刺（文件 + manifest MAIN 声明 + 构建第二入口） | 其 postMessage 在正式扩展里**零消费者**；e-hentai 站点全局经真机证实为函数声明、不可重定义 → 主世界脚本无存在理由 | chromium 与 firefox 的 content_scripts 恢复一致（此前 chromium 多挂一条） |
+| `minimum_chrome_version` 111 → 109 | 111 是为 MAIN world 抬的，脚本已删就该回落 | 修掉 manifest.test 既有红（断言 109） |
+| productionCanary 断言 `'erase'` → `'translate'` + `eraseDebug` | P4 收敛后 processMode 只剩 translate；canary 源码注释已写明「原 processMode='erase' 已移除」—— 是**测试落后于契约**，非产品回归 | 修掉 productionCanary 既有红 |
+
+**全仓 170 文件 / 1403 条全绿**；typecheck 0 错误；架构绿；产物重建（`ehentaiMainWorld.js` 不再产出）。
