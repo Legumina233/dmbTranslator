@@ -196,3 +196,29 @@ shinobu `archive/occam-076056a`、`wip/prefetch-runner`；外层 `archive/round3
 | productionCanary 断言 `'erase'` → `'translate'` + `eraseDebug` | P4 收敛后 processMode 只剩 translate；canary 源码注释已写明「原 processMode='erase' 已移除」—— 是**测试落后于契约**，非产品回归 | 修掉 productionCanary 既有红 |
 
 **全仓 170 文件 / 1403 条全绿**；typecheck 0 错误；架构绿；产物重建（`ehentaiMainWorld.js` 不再产出）。
+
+### 2026-10-03 · 译图缓存「条数上限 + 一键清空」（v0.1.4.100 之后的第一个特性）
+
+**需求**：弹窗「加载模型 / 卸载模型」两个按钮下方加一行「译图缓存」——
+能设置本地最多存几张译图（设 3 → 写第 4 张时把最久未用那张删掉），并且有一个删除全部缓存的按钮。
+
+**落点（自底向上五层，每层只加它该加的）**
+
+| 层 | 改动 |
+|---|---|
+| 设置层 `shared/config.ts` | 新增 `translationCacheLimit`（默认 200、钳在 1..1000，`normalizeTranslationCacheLimit`）。**默认与 `content/core/cache/translationCacheStore.ts` 的 `defaultTranslationCacheLimit` 必须同数**，有测试钉住（两边只改一边就会出现"设置写 200、实际按另一个数淘汰"） |
+| 存储契约 `translationCacheStore.ts` | `TranslationCacheStore` 加 `clear()` 与 `trim()`；内存实现与 IndexedDB 实现各补一份。**`trim()` 的存在理由**：淘汰只在 `put` 时发生，上限被调小时**存量不会自己缩** —— 不裁一次的话"设成 3 张"要等译满第 4 张才生效 |
+| 协议 `packages/image-pipeline/src/protocol` | 客户端消息加 `cache-clear` / `cache-trim`，`cache-write` 带 `cacheLimit`；宿主消息加 `cache-cleared` / `cache-trimmed`；两处判定函数同步（不同步 = 消息被静默丢弃、功能看着"没接上"却零报错） |
+| offscreen 宿主 `pipelineHost.ts` | `translationCacheLimit` 可变，**变了就重建落盘存储**；处理两个新消息 |
+| background `offscreenBroker` | `resolveClientCacheMessage()` 在转发时注入 `cacheLimit`（settings 只在 background）；新增 `clearTranslationCache()` / `trimTranslationCache()`，用**自己的 requestId + Promise 等待表**拿结果（不是走内容脚本那条 Port 路由），宿主断开时立刻 reject —— 绝不让按钮一直转圈 |
+| 后台消息 / 弹窗 | 新增 `mt:translation-cache`（action = trim / clear）走 `routeBackgroundMessage`；弹窗 `LocalModelControl` 下方新增 `TranslationCacheControl`（数字输入用草稿态，失焦或回车才提交；显示"当前 N 张"；「删除全部译图」按钮） |
+
+**为什么清空不能直接由弹窗删 IndexedDB**：库在 offscreen 文档的扩展 origin 下
+（内容脚本里开库会落到站点 origin，会被站点清掉），弹窗读不到也删不掉 —— 必须回到宿主那里做。
+
+**验证**：170 文件 / **1411 条全绿**（新增 8 条：上限钳制 3 条 + 存储 clear/trim 3 条 + 路由 1 条 + 「上限 3 写第 4 张」1 条）；
+typecheck 仅剩 4 条**既有**测试类型错误（`pageScheduler` ×1、`retarget` ×2、`pipelineContext` ×1 —— 干净树上同样红，属测量/工具层，登记不修）；
+架构绿；chromium 与 firefox 产物均已重建并核对标记。
+
+**已知留白（如实记）**：IndexedDB 适配层的 `clear` / `trim` 没有离线测试（仓库无 `fake-indexeddb` 依赖），
+策略层已由内存参照实现钉死，IDB 那一侧靠真机验。
