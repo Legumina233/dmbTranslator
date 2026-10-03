@@ -226,3 +226,8 @@ typecheck 仅剩 4 条**既有**测试类型错误（`pageScheduler` ×1、`reta
 **UI 修订（用户真机反馈，同日）**：第一版把「删除全部译图」做成了独占一行的全宽按钮，太占地。
 改为一行收纳：`译图缓存 [64px 数字框] 张 | 现存 N 张 | [删除全部]`（行内小按钮，悬停才变红——
 清空是破坏性操作，红色要出现在"手指已经伸过去"的那一刻）；操作结果反馈只在有话要说时出现。
+
+**UI 修订 2（同日）**：输入框仍被撑满整行 —— 根因是全局规则
+`.panel input[type='number'] { width: 100% }`（特异性 0-2-1）压过了单类名 `.cache-limit-input`（0-1-0）。
+用 `.panel input[type='number'].cache-limit-input`（0-3-1）压回 64px，不引 `!important`。
+shinobu `f4c5b9c`。
