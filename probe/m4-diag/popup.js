@@ -164,11 +164,12 @@
   copyBtn.addEventListener('click', function () {
     if (!lastPayload || lastPayload.error) return;
     var text = JSON.stringify({
-      probe: 'm4-diag 0.1.0',
+      probe: 'm4-diag 0.2.0',
       exportedAt: new Date().toISOString(),
       href: lastPayload.href,
       latest: lastPayload.latest,
-      history: lastPayload.history
+      history: lastPayload.history,
+      stacking: lastPayload.stacking === undefined ? null : lastPayload.stacking
     }, null, 2);
     navigator.clipboard.writeText(text).then(function () {
       copyBtn.textContent = '已复制';
