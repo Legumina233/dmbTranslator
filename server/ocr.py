@@ -279,20 +279,25 @@ def ocr_batch(mocr, items):
 
 
 def handle_ocr(body):
-    """POST /ocr → (status, obj)。识别结果直接返回（**不落归档**：2026-10-04 起不再写）。"""
+    """POST /ocr → (status, obj, timing)。
+
+    识别结果直接返回（**不落归档**：2026-10-04 起不再写）。
+    `timing` = 本服务自己测的耗时（total_ms / infer_ms / lines），由路由写进响应头
+    `X-DMB-Timing` —— 供扩展组装"整页日志"时把服务端侧耗时一并记上。
+    """
     import json
     try:
         obj = json.loads(body.decode("utf-8", "replace"))
     except Exception as e:
-        return 400, {"error": "JSON 解析失败: {}".format(e)}
+        return 400, {"error": "JSON 解析失败: {}".format(e)}, None
 
     images = obj.get("images") or []
     if not images:
-        return 400, {"error": "缺少 images 字段"}
+        return 400, {"error": "缺少 images 字段"}, None
 
     mocr, err = get_ocr()
     if err:
-        return 503, {"error": "manga-ocr 不可用: {}".format(err)}
+        return 503, {"error": "manga-ocr 不可用: {}".format(err)}, None
 
     results = []
     prepared = []
@@ -326,5 +331,10 @@ def handle_ocr(body):
     total_ms = int(round((time.time() - t0) * 1000))
     log("OCR 完成: {} 行, 合计 {} ms（推理 {} ms）".format(
         len(prepared), total_ms, int(round(infer_total * 1000))))
+    timing = {
+        "total_ms": total_ms,
+        "infer_ms": int(round(infer_total * 1000)),
+        "lines": len(prepared),
+    }
     # 不落归档（2026-10-04 用户拍板）：整页配对已删，OCR 记录成了没配对的纯噪音。
-    return 200, results
+    return 200, results, timing

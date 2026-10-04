@@ -33,6 +33,7 @@ from glossary import default_sakura_system, load_sakura_system     # noqa: E402
 from logging_ import (daily_log_path, log, trace_event,           # noqa: E402
                      write_image_record)
 from ocr import handle_ocr                                        # noqa: E402
+import pagelog                                                    # noqa: E402
 from translate import (PipelineError, RequestContext,             # noqa: E402
                        assemble_translate_payload, handle_translate)
 from panel import SERVER_PANEL_HTML                               # noqa: E402
@@ -45,8 +46,13 @@ LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def build_json_response(model, content, stream=False):
-    """OpenAI 兼容回包。stream 时给一段合法的 SSE（内容一次性发出）。"""
+def build_json_response(model, content, stream=False, timing=None):
+    """OpenAI 兼容回包。stream 时给一段合法的 SSE（内容一次性发出）。
+
+    `timing`（2026-10-04 新增）：本服务自己测的翻译耗时明细（模型 load/prefill/generate、
+    token 数等），作为**非标准顶层字段 `dmb_timing`** 放进响应体 —— OpenAI 客户端会忽略
+    未知字段，而我们的扩展靠它把服务端侧耗时并进"整页日志"（流式分支不带，见下）。
+    """
     if stream:
         chunk = {
             "id": "chatcmpl-dmb", "object": "chat.completion.chunk",
@@ -70,6 +76,8 @@ def build_json_response(model, content, stream=False):
                      "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
+    if timing:
+        obj["dmb_timing"] = timing
     return json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json"
 
 
@@ -86,9 +94,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Max-Age", "86400")
 
-    def _send(self, status, data, content_type):
+    def _send(self, status, data, content_type, extra_headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(data)))
         self._cors()
         self.end_headers()
@@ -97,9 +107,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
-    def _send_json(self, status, obj):
+    def _send_json(self, status, obj, extra_headers=None):
         self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
-                   "application/json")
+                   "application/json", extra_headers=extra_headers)
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -157,7 +167,12 @@ class Handler(BaseHTTPRequestHandler):
                          "stages": ctx.trace_stages()}, model=target)
             return True
 
-        data, ctype = build_json_response(target, result.content, stream)
+        # 服务端侧耗时明细：与 trace.jsonl 里的 stages 同一份（sakura_*/ollama_*/tokens）
+        data, ctype = build_json_response(target, result.content, stream, timing={
+            "total_ms": ctx.elapsed_ms(),
+            "unload_other_ms": ctx.unload_ms or 0,
+            "stages": ctx.trace_stages(),
+        })
 
         # ★ 先落盘，后响应（P0-C）
         # 2026-10-04 用户拍板：整页「配对」机制已删 —— 它在真机从未生效（扩展两端都不带
@@ -202,8 +217,20 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
 
         if self.path.startswith("/ocr"):
-            status, obj = handle_ocr(body)
-            self._send_json(status, obj)
+            status, obj, timing = handle_ocr(body)
+            self._send_json(status, obj, extra_headers=(
+                {"X-DMB-Timing": json.dumps(timing, ensure_ascii=False)} if timing else None))
+            return
+        if self.path.startswith("/log/page"):
+            # 整页日志：扩展组装好一条完整记录后 POST 过来（零配对、单一数据源）。
+            try:
+                rec = json.loads(body.decode("utf-8", "replace")) if body else {}
+            except Exception as e:
+                self._send_json(400, {"error": "JSON 解析失败: {}".format(e)})
+                return
+            ok, detail = pagelog.append_page_record(rec)
+            self._send_json(200 if ok else 500,
+                            {"ok": ok, "detail": detail, "path": pagelog.page_log_path()})
             return
         if self.path.startswith("/health"):
             self._send_json(200, self._health())
