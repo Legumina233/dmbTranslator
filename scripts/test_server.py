@@ -174,7 +174,7 @@ def main():
         prompt = "输入数据：" + json.dumps(regions_in, ensure_ascii=False)
         st, resp = post(base, "/v1/chat/completions", {
             "model": model, "messages": [{"role": "user", "content": prompt}],
-            "stream": False, "pageKey": PAGE_KEY + "-b"})
+            "stream": False})
         content = ""
         try:
             content = resp["choices"][0]["message"]["content"]
@@ -189,7 +189,7 @@ def main():
         else:
             bad("T4 结构化 regions", f"status={st} content={str(content)[:200]}")
     except Exception as e:
-        bad("T4 结构化 regions", str(e))
+        bad("T4 结构化 regions", "{}: {}".format(type(e).__name__, e))
 
     # T5 失败必须显式（不返回原文）
     try:

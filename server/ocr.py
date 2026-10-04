@@ -76,13 +76,6 @@ def _pad_token_id(mocr):
     return value if value is not None else -1
 
 
-def _pad_token_id(mocr):
-    """padding token id（-1 = 没有）。**必须与 eos 分开**：
-    置信度对齐要"去掉行尾 padding"，而 eos 是真实结束符 —— 把它也剥掉会把对齐整体判错一位。"""
-    value = getattr(mocr.tokenizer, "pad_token_id", None)
-    return value if value is not None else -1
-
-
 def _end_token_ids(mocr):
     """eos / pad 集合（用于"遇到结束符就停"）。见模块 docstring：必须把 generation_config 上的 eos 也算进来。"""
     ids = set()
@@ -219,8 +212,10 @@ def _conf_from_scores(scores, seq, row, end_ids, pad_id=-1):
                 break
             logprobs.append(torch.log_softmax(scores[t][row], dim=-1)[tid].item())
     except Exception as e:
+        # 口径与 confidence_from_sequence_score 一致：**算不出来就是 0（未知）**，
+        # 不能返回 1.0 —— 那等于"算不出就当最可信"，会把低置信告警整体关掉。
         log("  伪置信度计算失败（不影响文本）: {}".format(e))
-        return 1.0
+        return 0.0
     return confidence_from_logprobs(logprobs)
 
 

@@ -6,7 +6,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `app.py` | 入口 + HTTP 路由（**OCR + 翻译**）。**只做 route → service**；模型/ollama 控制已拆走 |
+| `app.py` | 入口 + HTTP 路由（**OCR + 翻译**）。**只做 route → service**；模型/ollama 控制已拆走（见 §七） |
 | `ollama_server.py` | ★ **独立服务（11437）**：启停 ollama 引擎 + 模型加载/卸载/状态。与 app.py 零依赖 |
 | `config.py` | 不可变配置。**任何请求级数据都不许放这里** |
 | `logging_.py` | 运行日志 / trace.jsonl / image.jsonl |
@@ -53,15 +53,12 @@ Sakura 是按官方语料训练的**专用**翻译模型。把通用指令（"�
 | `plain` | 含 `原文：…`（或已是 Sakura 官方句式） | 单段翻译 |
 | `native` | 都不含 | 通用模型原样转发；Sakura 则交给调用方（默认透传） |
 
-### 3.2 模型控制（解决"必须点开始翻译才加载"）
+### 3.2 模型控制（**已拆到独立服务 11437**，2026-10-04）
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/` | 控制面板（加载/卸载按钮、驻留明细、显存占用） |
-| GET | `/model/status` | `{keep_alive, auto_unload, installed:[{name,loaded}], loaded:[…size_vram…]}` |
-| POST | `/model/load` | `{model}` → 显式加载进显存。**加载前自动卸载其它驻留模型**；返回 `{ms, detail, unloaded:[…]}` |
-| POST | `/model/unload` | `{model}` → 卸载 |
-| POST | `/model/unload-all` | 卸载全部驻留模型 |
+模型加载/卸载/状态**不再由本服务提供** —— 本服务只做 OCR + 翻译。
+控制接口在 `ollama_server.py`（11437）：`GET /model/status`、`POST /model/load`、
+`POST /model/unload`、`POST /model/unload-all`、`POST /service/start|stop`、`GET /`（控制面板）。
+详见 §七。
 
 > ★ **模型互斥**：16 GB 显存装不下两个模型。`load_model()` 会先卸载除目标外的全部驻留模型，
 > 保证任意时刻只有一个模型在显存里（否则新模型只能部分 offload 到内存，速度暴跌甚至失败）。
@@ -83,7 +80,7 @@ v2 默认 `keep_alive = -1`（**永不过期**），卸载**只由显式 `/model
 |---|---|---|
 | **A** 日志静默丢条 6~21% | 全局 `_last_sakura_timing` 被缺 4 键的 `acc` **整体替换** → `KeyError` → 崩在写日志前 | **消灭全局变量**：计时写进 `ctx.stage`（每次请求独立对象）；纯函数 `ppl_geomean` / `stage_to_trace` 可单测 |
 | **B** 2.5% 的"译文"其实是日文原文 | `call_sakura` 失败 `return ""` + `or x` | `Backend.translate_lines` **失败必抛 `BackendError`**；`_finalize` 断言非空；路由把错误以 502 显式返回 |
-| **C** 记录永不写入 | `_send(200,…)` 排在记账之前 | **先记账，后响应**：`app._handle_chat` 里 `PAGES.complete()` → `trace_event()` → `self._send()` |
+| **C** 记录永不写入 | `_send(200,…)` 排在记账之前 | **先记账，后响应**：`app._handle_chat` 里 `write_image_record()` → `trace_event()` → `self._send()` |
 
 ### 整页"配对"已删（2026-10-04 用户拍板）
 
@@ -103,8 +100,8 @@ OCR 以前是浏览器本地跑的、根本不发 `/ocr`），
 
 | 命令 | 覆盖 | 依赖 |
 |---|---|---|
-| `python scripts\test_pure.py` | 20 项纯函数单测：切段、输入抽取、Sakura 官方格式、**pageKey 配对四条不变量** | 零依赖 |
-| `python scripts\test_server.py` | T1 健康 / T2 OCR / T3 简版翻译 + **配对落盘** / T4 结构化 regions / T5 **失败必须显式** | 需服务端 + Ollama |
+| `python scripts\test_pure.py` | 27 项纯函数单测：切段、输入抽取、Sakura 官方格式、**OCR 置信度口径**、**强制卸载语义** | 零依赖 |
+| `python scripts\test_server.py` | T1 健康 / T2 OCR / T3 简版翻译 + **翻译归档落盘** / T4 结构化 regions / T5 **失败必须显式** | 需服务端 + Ollama |
 
 > 两个脚本都显式绕开系统代理 —— 环境里设了 `http_proxy` 而没设 `no_proxy` 时，
 > urllib 会把 `127.0.0.1` 也塞给代理，拿回一个莫名其妙的 502（踩过）。
