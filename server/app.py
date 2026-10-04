@@ -30,9 +30,9 @@ from config import (DEFAULT_OLLAMA_SERVICE_PORT, DEFAULT_PORT,     # noqa: E402
                     GLOSSARY_FILE, LISTEN_HOST, SAKURA_MODEL, UPSTREAM,
                     keep_alive)
 from glossary import default_sakura_system, load_sakura_system     # noqa: E402
-from logging_ import daily_log_path, log, trace_event             # noqa: E402
+from logging_ import (daily_log_path, log, trace_event,           # noqa: E402
+                     write_image_record)
 from ocr import handle_ocr                                        # noqa: E402
-from pages import PAGES                                           # noqa: E402
 from translate import (PipelineError, RequestContext,             # noqa: E402
                        assemble_translate_payload, handle_translate)
 from panel import SERVER_PANEL_HTML                               # noqa: E402
@@ -136,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
         target, backend = resolve_model(requested)
         messages = obj.get("messages") or []
         stream = bool(obj.get("stream"))
-        ctx = RequestContext(model=target, backend=backend, page_key=obj.get("pageKey"))
+        ctx = RequestContext(model=target, backend=backend)
 
         t_unload = time.time()
         ensure_inactive_unloaded(target)
@@ -160,10 +160,13 @@ class Handler(BaseHTTPRequestHandler):
         data, ctype = build_json_response(target, result.content, stream)
 
         # ★ 先落盘，后响应（P0-C）
+        # 2026-10-04 用户拍板：整页「配对」机制已删 —— 它在真机从未生效（扩展两端都不带
+        # pageKey，481 条真机记录全是 none(no pageKey)）。归档本身保留：翻译侧照旧落一条，
+        # OCR 侧不再落（那是没配对的纯噪音）。详见 docs/SERVER.md §七。
         payload = assemble_translate_payload(ctx, result.translate_list)
-        PAGES.complete(ctx.page_key, payload)
+        write_image_record(payload, model=target)
         trace_event({"type": "translate", "mode": result.mode,
-                     "regions": result.region_count, "pageKey": ctx.page_key,
+                     "regions": result.region_count,
                      "duration_ms": ctx.elapsed_ms(), "stages": ctx.trace_stages()},
                     model=target)
         log(">>> 已返回 {} 结果 ({} region, {} ms)".format(

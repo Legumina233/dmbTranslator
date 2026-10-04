@@ -3,13 +3,13 @@
 
 铁律（来自 v1 的三个静默 P0）：
   * 先落盘，后响应 —— 绝不允许"响应已发出、处理线程才崩，记录永不写入"。
-  * 每条记录都要能指认【是哪一次请求】—— 所以 model / pageKey 一律显式传入，
-    不读任何全局变量。
+  * 每条记录都要能指认【是哪一次请求】—— 所以 model 一律显式传入，不读任何全局变量。
 
 目录结构（工程根/logs）：
   logs/<模型名>/YYYY-MM-DD.log          服务器运行日志（人类可读）
   logs/<模型名>/YYYY-MM-DD.trace.jsonl  分阶段耗时追踪
-  logs/<模型名>/YYYY-MM-DD.image.jsonl  整页级记录（一张图 = 一条）
+  logs/<模型名>/YYYY-MM-DD.image.jsonl  翻译侧归档（一条请求 = 一条；整页"配对"已删，
+                                        见 docs/SERVER.md §七）
 """
 import datetime
 import json

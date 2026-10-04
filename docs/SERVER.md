@@ -14,7 +14,6 @@
 | `sakura.py` | ★ **Sakura 适配层**：把通用请求规范成官方训练格式 |
 | `backends.py` | 后端策略对象（Sakura / Generic）+ `BackendError` |
 | `translate.py` | `RequestContext` + **唯一**翻译管线 |
-| `pages.py` | 整页记录配对（**显式 pageKey**，不再是 FIFO） |
 | `ocr.py` | manga-ocr 加载 / 单张 / 批量 |
 | `vram.py` | 模型解析、显存互斥、显式加载/卸载 |
 | `panel.py` | 自带控制面板单页（加载/卸载按钮） |
@@ -41,8 +40,8 @@ Sakura 是按官方语料训练的**专用**翻译模型。把通用指令（"�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/ocr` | `{images:[{id,data(base64),direction}], pageKey?}` → `[{id,text,confidence}]` |
-| POST | `/v1/chat/completions` | OpenAI 兼容。`{model, messages, stream, pageKey?}` |
+| POST | `/ocr` | `{images:[{id,data(base64),direction}]}` → `[{id,text,confidence}]` |
+| POST | `/v1/chat/completions` | OpenAI 兼容。`{model, messages, stream}` |
 | GET | `/v1/models` | 透传 Ollama `/api/tags`，前端下拉据此列出 |
 | GET | `/health` | 健康检查（不触发模型加载） |
 
@@ -86,10 +85,19 @@ v2 默认 `keep_alive = -1`（**永不过期**），卸载**只由显式 `/model
 | **B** 2.5% 的"译文"其实是日文原文 | `call_sakura` 失败 `return ""` + `or x` | `Backend.translate_lines` **失败必抛 `BackendError`**；`_finalize` 断言非空；路由把错误以 502 显式返回 |
 | **C** 记录永不写入 | `_send(200,…)` 排在记账之前 | **先记账，后响应**：`app._handle_chat` 里 `PAGES.complete()` → `trace_event()` → `self._send()` |
 
-另外把 v1 的 **FIFO 配对**换成**显式 pageKey**（`pages.py`）：
-* 同 key 的 OCR + 翻译 → 合成一条 `kind=page`
-* 翻译到了但 OCR 没到 → 落 `kind=partial / pairing=translate-only`，**绝不拿别的页的 OCR 硬配**
-* 超时只到一半 → 落 `kind=partial / pairing=incomplete(timeout)`
+### 整页"配对"已删（2026-10-04 用户拍板）
+
+原来的 `pages.py` 想把「同页 OCR + 同页翻译」合成一条 `kind=page` 记录（v1 的教训是
+FIFO 猜测会错配，所以 v2 只认显式 pageKey）。**实测：它在真机从未生效** ——
+扩展两端都不带 pageKey（翻译请求的 body 由 text-translation 包构造，包里没有 pageKey；
+OCR 以前是浏览器本地跑的、根本不发 `/ocr`），
+真机 481 条记录全是 `none(no pageKey)`，`kind=page` 一条都没有。
+
+所以整套配对机制已删除，归档口径简化为：
+
+* **翻译侧照旧落一条** `image.jsonl`（`translate_list` + 各阶段耗时），**没有配对、没有 pageKey**；
+* **OCR 侧不再落归档**（没配对的纯噪音）；
+* `pageKey` 这个标识本身保留 —— 它是扩展的页身份与译图缓存键，与本服务无关。
 
 ## 六、测试
 

@@ -23,7 +23,6 @@ from config import (
     OCR_ROTATE_VERTICAL,
 )
 from logging_ import log
-from pages import PAGES
 
 # vendor 的 manga-ocr 靠 sys.path 挂载（未 pip 安装）；放在最前，优先于任何已安装版本
 if os.path.isdir(MANGA_OCR_DIR) and MANGA_OCR_DIR not in sys.path:
@@ -285,7 +284,7 @@ def ocr_batch(mocr, items):
 
 
 def handle_ocr(body):
-    """POST /ocr → (status, obj)。records 先入 PAGES（按 pageKey 配对），再返回。"""
+    """POST /ocr → (status, obj)。识别结果直接返回（**不落归档**：2026-10-04 起不再写）。"""
     import json
     try:
         obj = json.loads(body.decode("utf-8", "replace"))
@@ -295,7 +294,6 @@ def handle_ocr(body):
     images = obj.get("images") or []
     if not images:
         return 400, {"error": "缺少 images 字段"}
-    page_key = obj.get("pageKey")
 
     mocr, err = get_ocr()
     if err:
@@ -331,15 +329,7 @@ def handle_ocr(body):
             results.append({"id": rid, "text": text, "confidence": round(conf, 4)})
 
     total_ms = int(round((time.time() - t0) * 1000))
-    # 先入账（可能触发整页配对落盘），后返回
-    PAGES.attach_ocr(page_key, {
-        "kind": "ocr",
-        "pageKey": page_key,
-        "model": None,
-        "ocr_total_ms": total_ms,
-        "ocr_infer_ms": int(round(infer_total * 1000)),
-        "ocr_lines": len(prepared),
-        "lines": [{"id": r.get("id"), "text": r.get("text"),
-                   "confidence": r.get("confidence")} for r in results],
-    })
+    log("OCR 完成: {} 行, 合计 {} ms（推理 {} ms）".format(
+        len(prepared), total_ms, int(round(infer_total * 1000))))
+    # 不落归档（2026-10-04 用户拍板）：整页配对已删，OCR 记录成了没配对的纯噪音。
     return 200, results

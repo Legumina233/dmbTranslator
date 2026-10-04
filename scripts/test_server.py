@@ -4,8 +4,9 @@
 
 覆盖四条路径 + 两个"必须成立"的断言：
   T1 /health
-  T2 /ocr（带 pageKey）
-  T3 /v1/chat/completions 简版（带 pageKey）→ 译出中文；并断言 pageKey 配对落了一条 image.jsonl
+  T2 /ocr
+  T3 /v1/chat/completions 简版 → 译出中文；并断言翻译侧仍落一条 image.jsonl 归档
+     （整页"配对"已删：2026-10-04 用户拍板，它从未在真机生效）
   T4 /v1/chat/completions 结构化（regions）→ 回 regions，columns 按 targetLines/targetColumns 切
   T5 失败必须显式：故意请求一个不存在的模型名 + 空文本，断言**不会**把原文当译文返回
 
@@ -26,7 +27,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 JP = "猫が庭で寝ている"
 JP2 = "これはテストです"
-PAGE_KEY = "4218710-129"          # 与探针实测的 pageKey 规则一致
 
 _fail = []
 
@@ -131,7 +131,7 @@ def main():
         png = make_png()
         b64 = base64.b64encode(png).decode()
         st, resp = post(base, "/ocr", {"images": [
-            {"id": "line-1", "data": b64, "direction": "h"}], "pageKey": PAGE_KEY})
+            {"id": "line-1", "data": b64, "direction": "h"}]})
         items = resp if isinstance(resp, list) else [resp]
         text = " ".join(str(i.get("text", "")) for i in items if isinstance(i, dict))
         if st == 200 and has_cjk(text):
@@ -141,12 +141,12 @@ def main():
     except Exception as e:
         bad("T2 /ocr", str(e))
 
-    # T3 简版 + pageKey 配对
+    # T3 简版翻译 + 归档落盘
     try:
         st, resp = post(base, "/v1/chat/completions", {
             "model": model,
             "messages": [{"role": "user", "content": f"原文：{JP}"}],
-            "stream": False, "pageKey": PAGE_KEY})
+            "stream": False})
         content = ""
         try:
             content = resp["choices"][0]["message"]["content"]
@@ -158,11 +158,12 @@ def main():
             bad("T3 简版翻译", f"status={st} content={content[:160]}")
 
         rec, path = last_image_record(model)
-        if rec and rec.get("kind") == "page" and rec.get("pageKey") == PAGE_KEY:
-            ok("T3b pageKey 配对落盘", f"{path.name} kind=page pageKey={rec.get('pageKey')}")
+        if rec and rec.get("translate_list"):
+            ok("T3b 翻译归档落盘", f"{path.name} translate_list={len(rec.get('translate_list') or [])} 条")
         else:
-            bad("T3b pageKey 配对落盘",
-                f"最后一条记录不是配对页记录: {json.dumps(rec, ensure_ascii=False)[:200] if rec else '无'}")
+            bad("T3b 翻译归档落盘",
+                f"最后一条记录里没有 translate_list: "
+                f"{json.dumps(rec, ensure_ascii=False)[:200] if rec else '无'}")
     except Exception as e:
         bad("T3 简版翻译", str(e))
 

@@ -114,56 +114,6 @@ class TestSakuraAdapter(unittest.TestCase):
         self.assertTrue(sakura.has_translatable("猫"))
 
 
-class TestPagePairing(unittest.TestCase):
-    """pageKey 配对的四条不变量。"""
-
-    def setUp(self):
-        import pages
-        self.pages = pages
-        self.written = []
-        self._orig = pages.write_image_record
-        pages.write_image_record = lambda rec, model=None: self.written.append(rec) or True
-
-    def tearDown(self):
-        self.pages.write_image_record = self._orig
-
-    def test_same_key_pairs_into_one_page_record(self):
-        st = self.pages.PageStore()
-        st.attach_ocr("4218710-9", {"kind": "ocr"})
-        self.assertEqual(self.written, [])          # 还没凑齐，不许落盘
-        st.complete("4218710-9", {"kind": "tr", "model": "sakura-14b"})
-        self.assertEqual(len(self.written), 1)
-        self.assertEqual(self.written[0]["kind"], "page")
-        self.assertEqual(self.written[0]["pageKey"], "4218710-9")
-
-    def test_different_keys_never_cross_pair(self):
-        st = self.pages.PageStore()
-        st.attach_ocr("A", {"kind": "ocr-A"})
-        st.complete("B", {"kind": "tr-B", "model": "m"})
-        # B 没有自己的 OCR → 只能落 translate-only，绝不能拿 A 的 OCR 去配
-        self.assertEqual(len(self.written), 1)
-        rec = self.written[0]
-        self.assertEqual(rec["kind"], "partial")
-        self.assertEqual(rec["pageKey"], "B")
-        self.assertIsNone(rec["ocr"])
-        self.assertEqual(rec["pairing"], "translate-only(no ocr)")
-
-    def test_no_page_key_writes_standalone(self):
-        st = self.pages.PageStore()
-        st.attach_ocr(None, {"kind": "ocr"})
-        st.complete(None, {"kind": "tr", "model": "m"})
-        self.assertEqual(len(self.written), 2)      # 各自单独落，不配对
-        self.assertTrue(all(r["pageKey"] is None for r in self.written))
-
-    def test_stale_half_pair_is_flushed_not_lost(self):
-        st = self.pages.PageStore()
-        st.attach_ocr("C", {"kind": "ocr-C"})
-        st.flush_stale(max_age_s=-1)                # 强制视为过期
-        self.assertEqual(len(self.written), 1)
-        self.assertEqual(self.written[0]["kind"], "partial")
-        self.assertEqual(self.written[0]["pairing"], "incomplete(timeout)")
-
-
 class TestOcrConfidence(unittest.TestCase):
     """OCR 置信度口径（2026-10-04）：长度无关、单调，且与调用方 0.3 阈值可比。
 
@@ -191,7 +141,7 @@ class TestOcrConfidence(unittest.TestCase):
         self.assertAlmostEqual(short, long, places=6)
 
     def test_matches_real_machine_value(self):
-        """真机实录：正确文本的平均 logprob ≈ -3.66 → 落在 0.2 档（不再是无意义的 0）。"""
+        """真机实测：正确文本的平均 logprob ≈ -3.66 → 落在 0.2 档（不再是无意义的 0）。"""
         from ocr import confidence_from_logprobs
         conf = confidence_from_logprobs([-3.66] * 16)
         self.assertGreater(conf, 0.15)
@@ -207,10 +157,8 @@ class TestOcrConfidence(unittest.TestCase):
     # 所以置信度改用 HF 的 sequences_scores（返回序列自身的分数）反推。
     def test_sequence_score_denormalizes_length_penalty(self):
         """sequences_scores = sum(logprob) / len**penalty → 反推平均 NLL 与乘除无关。"""
-        from ocr import confidence_from_sequence_score
-        # 同一段序列质量（每 token prob≈0.37 → NLL≈1.0），长度与惩罚不同也该给同一置信度
+        from ocr import confidence_from_sequence_score, confidence_from_logprobs
         length, penalty = 19, 2.0
-        from ocr import confidence_from_logprobs
         # sum(logprob) = -length（即平均 NLL=1）→ sequences_scores = sum / len**penalty
         score = (-1.0 * length) / (length ** penalty)
         conf = confidence_from_sequence_score(score, length, penalty)

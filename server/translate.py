@@ -23,10 +23,9 @@ from logging_ import log
 
 @dataclass
 class RequestContext:
-    """一次请求的全部身份与计量。持有 model/backend/page_key/计时/计数。"""
+    """一次请求的全部身份与计量。持有 model/backend/计时/计数。"""
     model: str
     backend: str
-    page_key: Optional[str] = None
     t_start: float = field(default_factory=time.time)
     unload_ms: int = 0
     stage: Dict[str, Any] = field(default_factory=dict)

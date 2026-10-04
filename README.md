@@ -69,7 +69,7 @@ scripts\test_ocr.cmd
 | `npm run typecheck:extension` | ✅ 通过 |
 | `npm run build:extension:chromium` | ✅ vite 打包成功，产物齐（content 288K / onnxWorker 812K / popup 173K / models 随包） |
 | 服务端纯函数单测 `scripts/test_pure.py` | ✅ **20/20** |
-| 服务端端到端 `scripts/test_server.py` | ✅ **6/6**（OCR 出日文、Sakura 出中文、pageKey 配对落盘、结构化 regions、失败显式报错） |
+| 服务端端到端 `scripts/test_server.py` | ✅ **6/6**（OCR 出日文、Sakura 出中文、翻译归档落盘、结构化 regions、失败显式报错） |
 | 模型加载/卸载接口 | ✅ 卸载→`(无)`；加载→5.7s、`keep_alive=-1`、8290 MB 驻留 |
 
 ## 模型控制面板
