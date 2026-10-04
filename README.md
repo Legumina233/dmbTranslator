@@ -39,8 +39,11 @@
 - [x] Phase 0 地基：`git init`、`.gitignore`、上游 pin、目录骨架
 - [x] 上游 ShinobuTranslator 干净 clone @ `a5af759`
 - [x] vendor manga-ocr、搬入上游 ONNX 资产（detector/inpaint/bubble/PP-OCRv6）
-- [ ] **Phase 1 探针**（决定 e-hentai adapter 的写法）← 见 `docs/PHASE1_PROBE.md`
-- [ ] 服务端 v2 + 单图页 `/s/` 悬浮按钮翻译跑通（shinobu + mangaocr 首个里程碑）
+- [x] **Phase 1 探针**（已定案，见 `docs/PHASE1_PROBE.md` 与 `docs/ARCHITECTURE.md` 的 pageKey 契约）
+- [x] 服务端 v2 + 单图页 `/s/` 悬浮按钮翻译跑通（首个里程碑）
+- [x] M4 预取链 + 常驻画框 + 双服务（OCR/翻译 11436 ／ ollama 控制 11437）
+- [x] OCR 改走本机服务 manga-ocr（浏览器侧不再加载 ONNX OCR）
+- [x] 三轮代码审计 + 受控清尾（见 `docs/项目完结代码审计报告-*.md`）
 
 ## 起步
 
