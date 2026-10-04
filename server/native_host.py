@@ -9,9 +9,15 @@ stdout 只能写协议内容，日志一律走 stderr）：
            "enabled": true | false,
            "port": 11436}          # 仅 target=server 需要；来自扩展当前配置的 Base URL
     回复: {"ok": true,
-           "server":  {"running": bool},
-           "ollama": {"running": bool}}
+           "server":  {"running": bool},   # dmb_server（OCR + 翻译，11436）
+           "ollama": {"running": bool}}    # Ollama 独立服务（11437）—— 引擎与模型控制都在里面
           # 失败: ok=false 且带 "error"（此时 server/ollama 仍为当前真实状态）
+
+★ 2026-10-04（用户拍板）：target=ollama 现在启停的是**独立的 Ollama 服务进程**
+  （`ollama_server.py`，11437），由它去管 ollama 引擎与模型；不再直接启停 ollama.exe。
+  这样 ollama 的开关与 dmb_server 互不依赖，两边可各自开关、互不影响。
+  关闭走的是服务自己的优雅通道（POST /shutdown）：**先卸模型 → 再停 ollama → 服务退出**，
+  顺序反了会出现"开关回弹"（引擎关了但显存还占着、状态还是已加载）。
 
 状态查询**不在这里**：扩展直接 HTTP 探活服务端口（不发消息、不拉进程、可高频轮询）。
 宿主处理完一条消息即退出，无常驻进程。
@@ -48,10 +54,11 @@ def current_state(server_port):
 
     回复里带上它，UI 在收到启停结果时可即时更新圆点，不必等下一次 HTTP 轮询。
     这是客户端 setServiceEnabled 期望的契约：reply.server.running / reply.ollama.running。
+    注意 ollama 这一项探的是**独立服务**（11437）——它就是 ollama 的开关本体。
     """
     return {
         "server": {"running": service_control.port_open(server_port)},
-        "ollama": {"running": service_control.port_open(service_control.OLLAMA_PORT)},
+        "ollama": {"running": service_control.port_open(service_control.OLLAMA_SERVICE_PORT)},
     }
 
 
@@ -68,8 +75,8 @@ def handle(msg):
         result = (service_control.start_server(port) if enabled
                   else service_control.stop_server(port))
     elif target == "ollama":
-        result = (service_control.start_ollama() if enabled
-                  else service_control.stop_ollama())
+        result = (service_control.start_ollama_service() if enabled
+                  else service_control.stop_ollama_service())
     else:
         return {"ok": False, "error": "未知目标: {!r}".format(target), **current_state(port)}
 

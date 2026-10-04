@@ -6,7 +6,8 @@
 
 | 文件 | 职责 |
 |---|---|
-| `app.py` | 入口 + HTTP 路由。**只做 route → service** |
+| `app.py` | 入口 + HTTP 路由（**OCR + 翻译**）。**只做 route → service**；模型/ollama 控制已拆走 |
+| `ollama_server.py` | ★ **独立服务（11437）**：启停 ollama 引擎 + 模型加载/卸载/状态。与 app.py 零依赖 |
 | `config.py` | 不可变配置。**任何请求级数据都不许放这里** |
 | `logging_.py` | 运行日志 / trace.jsonl / image.jsonl |
 | `glossary.py` | 术语表热重载 + Sakura user prompt 拼装 |
@@ -99,3 +100,57 @@ v2 默认 `keep_alive = -1`（**永不过期**），卸载**只由显式 `/model
 
 > 两个脚本都显式绕开系统代理 —— 环境里设了 `http_proxy` 而没设 `no_proxy` 时，
 > urllib 会把 `127.0.0.1` 也塞给代理，拿回一个莫名其妙的 502（踩过）。
+
+
+---
+
+## 七、Ollama 与模型控制已拆成独立服务（2026-10-04 用户拍板）
+
+### 为什么拆
+
+原先"模型加载/卸载/状态"由 dmb_server（11436）提供 —— 于是**管模型这件事被绑死在
+OCR/翻译服务上**：dmb_server 一关就管不了模型，开关与卸载状态互相牵连、还会"回弹"。
+现在分成两个互不依赖的进程，各自开关：
+
+| 进程 | 端口 | 职责 | 启动方式 |
+|---|---|---|---|
+| `app.py`（dmb_server） | 11436 | manga-ocr（`/ocr`）+ Sakura 规范化翻译（`/v1/chat/completions`） | `scripts\start_server.cmd` |
+| `ollama_server.py` | 11437 | ollama 引擎启停 + 模型状态/加载/卸载 | `scripts\start_ollama.cmd` |
+| （ollama 引擎本身） | 11434 | 推理 | 由 11437 服务拉起 |
+
+扩展「点开关」链路：Native Messaging → `service_control` → **启停 11437 这个服务**，
+不再直接启停 `ollama.exe`；dmb_server 那条链路完全不变。
+
+### 关停/卸载的强制语义（用户口径：不能被"进程正在跑"卡住）
+
+- **关闭 ollama**：`POST /service/stop`（或 `/shutdown`）→
+  ① 先 `keep_alive:0` 卸载**全部驻留模型**（`vram.unload_model_forced`）→
+  ② 再结束整棵进程树（`ollama app.exe` / `ollama.exe` / 模型 runner）→ ③ 确认端口关闭。
+  **顺序不能反**：引擎先死就再也发不出卸载请求，显存只能被动释放，
+  下次打开时那些模型还"算已加载" → 用户看到的就是"回弹"。
+- **卸载单个模型**：`/model/unload` 走同一个强制路径 —— 温和请求后用 1s 宽限期确认；
+  仍在驻留（典型：正在跑推理）就**直接结束 runner 进程**，不傻等。
+  宽限 ≠ 阻塞：最多等 1 秒。
+- 启动 11437 服务时会先确保引擎在跑，并后台清掉上次残留的驻留模型（状态干净）。
+
+### 扩展侧改动
+
+- OCR 引擎默认改为 `manga_ocr_server`（走 11436 的 `/ocr`，manga-ocr 本地 GPU），
+  浏览器不再加载 ONNX 版 PaddleOCR；本地 provider 代码保留为备选。
+  **服务不可用/报错 → 该页显式失败，绝不静默回退本地 ONNX。**
+- 模型 UI 与 ollama 探活改指 11437（`localServiceClient.ollamaServiceBase`）。
+
+### OCR 置信度口径（同批修）
+
+真机实录：manga-ocr 的 `generation_config` 是 **`num_beams=4 / length_penalty=2.0`**（beam search）。
+此时 `generate()` 的 `scores` 是「batch × beams」条分布，**无法按行归属**（同一张图单独跑 0.2144、
+混在批量里变成 0.0 —— 8 个候选里找不到真值）。所以置信度改用 HF 的 `sequences_scores`
+（返回序列自身的分数）反推平均每 token 负对数似然，再映射 `1/(1+NLL)` 到 0~1：
+
+- 长度无关（原来用"概率的几何平均"，16 字正确文本只给 0.0257，而调用方以 0.3 判"可疑"，
+  于是**每一行都白吃一个可疑信号**）；
+- 批量/单行结果一致（原来批量下恒为 0）；
+- 真机值：cc-100 样例 ≈ 0.399（文本完全正确）。
+
+> 注：`sequences_scores` 在 beam search 下带 `length_penalty` 归一，反推时必须
+> `score * len ** (penalty - 1)` 才能还原平均对数概率。

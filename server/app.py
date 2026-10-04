@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""dmbTranslator v2 —— 入口与 HTTP 路由。
+"""dmbTranslator v2 —— 入口与 HTTP 路由（OCR + 翻译）。
 
 职责边界：本文件**只做 route → service**，不放业务逻辑（目标 ~250 行）。
+
+★ 2026-10-04（用户拍板）：**ollama 与模型控制已拆到独立服务** `ollama_server.py`（11437）。
+  本服务只剩 manga-ocr（/ocr）与 Sakura 规范化翻译（/v1/chat/completions），
+  与 ollama 的启停/模型加载卸载**互不依赖**，两边可自由开关。
+  所以这里不再有 /model/* 路由，启动时也不再清显存（那是 ollama 服务的事）。
 
 v1 的 P0-C 修复：**先落盘，后响应**。v1 把 `_send(200,...)` 排在记账之前，
 响应已发出、处理线程才崩，记录就永远写不进去。
@@ -10,7 +15,6 @@ v1 的 P0-C 修复：**先落盘，后响应**。v1 把 `_send(200,...)` 排在�
 import json
 import os
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -22,18 +26,19 @@ if HERE not in sys.path:
 
 import ocr as ocr_mod                                             # noqa: E402
 from backends import BackendError                                 # noqa: E402
-from config import (DEFAULT_PORT, GLOSSARY_FILE, LISTEN_HOST,     # noqa: E402
-                    SAKURA_MODEL, UPSTREAM, keep_alive)
+from config import (DEFAULT_OLLAMA_SERVICE_PORT, DEFAULT_PORT,     # noqa: E402
+                    GLOSSARY_FILE, LISTEN_HOST, SAKURA_MODEL, UPSTREAM,
+                    keep_alive)
 from glossary import default_sakura_system, load_sakura_system     # noqa: E402
 from logging_ import daily_log_path, log, trace_event             # noqa: E402
 from ocr import handle_ocr                                        # noqa: E402
 from pages import PAGES                                           # noqa: E402
 from translate import (PipelineError, RequestContext,             # noqa: E402
                        assemble_translate_payload, handle_translate)
-from panel import CONTROL_PANEL_HTML                              # noqa: E402
-from vram import (ensure_inactive_unloaded, load_model,            # noqa: E402
-                  local_model_names, model_base, model_status,
-                  resolve_model, unload_all_models, unload_model)
+from panel import SERVER_PANEL_HTML                               # noqa: E402
+# 翻译路径仍需"请求的模型名 → 实际模型 + 后端"与"腾显存"两件小事：
+# 它们是**对 Ollama 的查询**（HTTP 客户端），不是模型控制面 —— 控制面在 ollama_server。
+from vram import ensure_inactive_unloaded, resolve_model           # noqa: E402
 
 LISTEN_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
 
@@ -176,55 +181,16 @@ class Handler(BaseHTTPRequestHandler):
             "port": LISTEN_PORT,
         }
 
-    # ---- 模型控制（面板 + 接口）----
-    def _handle_model(self, body):
-        try:
-            obj = json.loads(body.decode("utf-8", "replace")) if body else {}
-        except Exception:
-            obj = {}
-        path = self.path.split("?")[0].rstrip("/")
-
-        if path.endswith("/model/status"):
-            self._send_json(200, model_status())
-            return
-        if path.endswith("/model/unload-all"):
-            unload_all_models()
-            self._send_json(200, {"ok": True, "detail": "已卸载全部驻留模型"})
-            return
-
-        name = obj.get("model") or obj.get("name")
-        if not name:
-            self._send_json(400, {"error": "缺少 model 字段"})
-            return
-        target, _backend = resolve_model(name)
-
-        if path.endswith("/model/load"):
-            okk, ms, detail, unloaded = load_model(target)
-            self._send_json(200 if okk else 502,
-                            {"ok": okk, "model": target, "ms": ms,
-                             "detail": detail, "unloaded": unloaded})
-            return
-        if path.endswith("/model/unload"):
-            unload_model(target)
-            self._send_json(200, {"ok": True, "model": target, "detail": "已请求卸载"})
-            return
-        self._send_json(404, {"error": "未知的 /model 路径: {}".format(self.path)})
+    # ---- 模型控制已拆走（2026-10-04）----
+    # /model/* 与"加载/卸载/状态"归 ollama 独立服务（11437，server/ollama_server.py）。
+    # 本服务不再提供这些路由：这样 dmb_server 关掉也能管模型，两边互不牵连。
 
     def do_GET(self):
         if self.path.startswith("/health"):
             self._send_json(200, self._health())
             return
         if self.path in ("/", "/index.html", "/panel"):
-            self._send(200, CONTROL_PANEL_HTML.encode("utf-8"), "text/html; charset=utf-8")
-            return
-        if self.path.startswith("/model/status"):
-            self._send_json(200, model_status())
-            return
-        if self.path.startswith("/v1/models"):
-            names = local_model_names() or [SAKURA_MODEL]
-            self._send_json(200, {"object": "list", "data": [
-                {"id": n, "object": "model", "owned_by": "dmb-local", "root": model_base(n)}
-                for n in names]})
+            self._send(200, SERVER_PANEL_HTML.encode("utf-8"), "text/html; charset=utf-8")
             return
         self._passthrough(None, "GET")
 
@@ -238,9 +204,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/health"):
             self._send_json(200, self._health())
-            return
-        if self.path.startswith("/model/"):
-            self._handle_model(body)
             return
         if "/chat/completions" in self.path or "/api/chat" in self.path:
             if self._handle_chat(body):
@@ -260,21 +223,17 @@ def _ensure_glossary():
 
 
 def banner():
-    names = local_model_names()
     custom = os.path.exists(os.path.join(HERE, "sakura_prompt.txt")) and \
         load_sakura_system(SAKURA_MODEL).strip() != default_sakura_system(SAKURA_MODEL).strip()
     log("=" * 60)
     log("dmbTranslator v2 本地服务已启动: http://{}:{}".format(LISTEN_HOST, LISTEN_PORT))
     log("  翻译端点  Shinobu Base URL 填 http://127.0.0.1:{}/v1".format(LISTEN_PORT))
-    log("  OCR 端点  http://127.0.0.1:{}/ocr".format(LISTEN_PORT))
+    log("  OCR 端点  http://127.0.0.1:{}/ocr  （manga-ocr，本地 GPU）".format(LISTEN_PORT))
     log("  转发上游  {}".format(UPSTREAM))
-    log("  可用模型  {}".format(", ".join(names) or "(拉取失败)"))
-    log("  默认模型  {}".format(SAKURA_MODEL))
-    log("  模型控制  http://{}:{}/   （加载/卸载模型按钮）".format(LISTEN_HOST, LISTEN_PORT))
-    log("  驻留策略  keep_alive={}  {}".format(
-        keep_alive(), "（永不过期，只能手动卸载）" if keep_alive() in (-1, "-1")
-        else "（会自动卸载，设 DMB_KEEP_ALIVE=-1 可关闭）"))
+    log("  默认模型  {}   keep_alive={}".format(SAKURA_MODEL, keep_alive()))
     log("  Sakura提示  {}".format("自定义文件" if custom else "按模型版本自动选择"))
+    log("  模型/ollama 控制  → 已拆到独立服务 http://{}:{}".format(
+        LISTEN_HOST, DEFAULT_OLLAMA_SERVICE_PORT))
     log("  日志目录  {}  (按模型分子目录，每天一个文件)".format(
         os.path.dirname(daily_log_path("log", SAKURA_MODEL))))
     log("  当天日志  {}".format(daily_log_path("log", SAKURA_MODEL)))
@@ -285,9 +244,8 @@ def banner():
 def main():
     _ensure_glossary()
     banner()
-    # 卸载显存里的模型放到后台：实测卸载一个 14B 模型要 ~19s，
-    # 若同步执行，端口在这 19 秒内是死的（实测踩过）。先起监听，再慢慢清显存。
-    threading.Thread(target=unload_all_models, name="startup-unload", daemon=True).start()
+    # 注意：本服务**不再**在启动时清显存 —— 那是 ollama 独立服务启动时的活。
+    # （原先在这里卸模型，会让"启动 OCR/翻译服务"顺带动 ollama 的状态，正是要解开的耦合。）
     srv = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     try:
         srv.serve_forever()

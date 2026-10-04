@@ -5,6 +5,8 @@
 所以 **任何时刻只允许一个模型驻留** —— 翻译前必须卸载其余模型。
 """
 import json
+import os
+import subprocess
 import time
 import urllib.request
 
@@ -82,15 +84,15 @@ def load_model(name, keep=None):
     from config import keep_alive
     ka = keep if keep is not None else keep_alive()
 
-    # ① 先腾地方：卸载除目标之外的所有驻留模型
+    # ① 先腾地方：**确保**其它驻留模型真的退出显存（否则新模型只能部分 offload）
     target_base = model_base(name)
     unloaded = []
     try:
         for m in loaded_models():
             if model_base(m) != target_base:
                 log("  加载前卸载其它模型 {}（保证单模型驻留）".format(m))
-                unload_model(m)
-                unloaded.append(m)
+                _ok, detail = unload_model_forced(m)
+                unloaded.append("{}（{}）".format(m, detail))
     except Exception as e:
         log("  （加载前卸载其它模型时忽略: {}）".format(e))
 
@@ -179,13 +181,93 @@ def ensure_inactive_unloaded(keep):
             unload_model(m)
 
 
+# ── 强制卸载（2026-10-04 用户拍板：卸载绝不能被"进程正在跑"卡住）─────────────
+#
+# 背景：`unload_model` 只是发一个 keep_alive:0 的请求。如果那个模型**正在跑推理**，
+# Ollama 会等它跑完才真正退掉 runner —— 于是 UI 上点了"卸载"，显存还占着、状态还是
+# "已加载"，用户看到的就是"卸载回弹"。用户口径：卸载是个强制动作，进程在跑也要停掉。
+#
+# 所以卸载分两步：① 先温和地请 Ollama 释放（正常路径下它自己会退 runner）；
+# ② 若仍在驻留列表里，**直接结束该模型的 runner 进程**，再确认。
+# 硬约束"任意时刻只有一个模型驻留"（16GB）让第②步是安全的：
+# 结束 runner 进程 = 把当前驻留的那个模型踢出显存，正是我们要的效果。
+
+# Ollama 各版本的 runner 进程名（新旧都列上）。它们都是 ollama.exe 的子进程。
+RUNNER_IMAGE_NAMES = ("ollama_llama_server.exe", "llama-server.exe")
+
+_UNLOAD_VERIFY_ROUNDS = 20
+_UNLOAD_VERIFY_INTERVAL = 0.25      # 每轮间隔
+# 宽限轮数：先给温和路径 1s 生效时间（卸载是异步的，刚发完请求 /api/ps 还会列着它），
+# 超过就把"正在跑推理"判定成立 → 直接结束 runner。宽限 ≠ 阻塞：总共最多等 1 秒。
+_UNLOAD_GRACE_ROUNDS = 4
+
+
+def resident_bases():
+    """当前驻留显存的模型基名集合（用于卸载后核对真的生效了）。"""
+    return {model_base(m) for m in loaded_models()}
+
+
+def kill_model_runners():
+    """结束所有模型 runner 进程（ollama_llama_server / llama-server）。返回被杀的名字。"""
+    killed = []
+    flags = 0x08000000 if os.name == "nt" else 0
+    for name in RUNNER_IMAGE_NAMES:
+        try:
+            kwargs = {"capture_output": True, "timeout": 15}
+            if flags:
+                kwargs["creationflags"] = flags
+            res = subprocess.run(["taskkill", "/IM", name, "/F", "/T"], **kwargs)
+            if res.returncode == 0:
+                killed.append(name)
+        except Exception as e:
+            log("  （结束 {} 时忽略: {}）".format(name, e))
+    if killed:
+        log("  已强制结束模型 runner 进程: {}".format(", ".join(killed)))
+    return killed
+
+
+def unload_model_forced(name, wait=True):
+    """卸载一个模型，**保证真的不再驻留**。返回 (ok, detail)。
+
+    · wait=False 时只发温柔请求，不做等待/强制（翻译路径上的"腾地方"用这个）。
+    · wait=True：温和请求 → 宽限 1s 内消失就算温柔成功；否则**结束 runner 进程**
+      （正在跑的推理也停 —— 用户口径：卸载不能被进程卡住）。
+    """
+    base = model_base(name)
+    unload_model(name)                      # ① 温和请求
+    if not wait:
+        return True, "已请求卸载"
+    killed = False
+    for i in range(_UNLOAD_VERIFY_ROUNDS):
+        if base not in resident_bases():
+            return True, ("已强制卸载（结束了 runner 进程）" if killed else "已卸载")
+        if i >= _UNLOAD_GRACE_ROUNDS and not killed:
+            # 宽限期内没消失：认定为"模型正在跑"，不再等 —— 直接收掉 runner
+            kill_model_runners()
+            killed = True
+        time.sleep(_UNLOAD_VERIFY_INTERVAL)
+    if base in resident_bases():
+        return False, "卸载后仍在驻留（runner 进程拒绝退出）"
+    return True, "已强制卸载（结束了 runner 进程）"
+
+
+def unload_all_models_forced():
+    """卸载全部驻留模型，逐个走强制路径。返回 (ok, detail, unloaded[])"""
+    names = loaded_models()
+    if not names:
+        return True, "当前无模型驻留", []
+    unloaded = []
+    failures = []
+    for m in names:
+        ok, detail = unload_model_forced(m)
+        (unloaded if ok else failures).append("{}（{}）".format(m, detail))
+    if failures:
+        return False, "部分模型未能卸载: " + "、".join(failures), unloaded
+    return True, "已卸载 {} 个模型".format(len(unloaded)), unloaded
+
+
 def unload_all_models():
-    """启动时清空显存，保证干净状态。"""
-    loaded = loaded_models()
-    if not loaded:
-        log("  当前无模型驻留，无需卸载")
-        return
-    log("  启动即卸载显存内所有模型（{} 个）".format(len(loaded)))
-    for m in loaded:
-        log("    -> 卸载 {}".format(m))
-        unload_model(m)
+    """启动时清空显存，保证干净状态（强制路径：启动就该是干净的）。"""
+    ok, detail, unloaded = unload_all_models_forced()
+    log("  启动显存清理: {}".format(detail))
+    return ok

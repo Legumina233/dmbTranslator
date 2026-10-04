@@ -17,18 +17,25 @@
 对每个操作的返回值只包含调用方真正用到的东西：running / started|stopped / error。
 状态查询不在这里 —— 扩展直接 HTTP 探活服务端口，不经过任何本机进程。
 """
+import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER_APP = os.path.join(HERE, "app.py")
+# ★ Ollama 与模型控制独立成服务（2026-10-04）：宿主启停的是**这个**服务，
+#   再由它去启停 ollama 引擎 —— 于是 ollama 的开关不再依赖 dmb_server。
+OLLAMA_SERVICE_APP = os.path.join(HERE, "ollama_server.py")
 
 DEFAULT_SERVER_PORT = 11436
 OLLAMA_PORT = 11434
+OLLAMA_SERVICE_PORT = 11437
 
 # V1 的 serv_ollama.cmd 里写死的模型目录；沿用它，否则 Ollama 会去默认位置找模型
 OLLAMA_MODELS_DIR = r"E:\AI\Ollama\OllamaModels"
@@ -220,11 +227,107 @@ def start_ollama():
 
 
 def stop_ollama():
+    """关闭 Ollama 引擎：**先卸载全部驻留模型，再结束整棵进程树**。
+
+    顺序不能反（2026-10-04 用户拍板）：`ollama.exe` 一死，卸载就再也发不出去，
+    显存只能靠进程退出被动释放；而下一次启动时那些模型还"算已加载"，
+    UI 上就会看到开关/加载状态回弹。所以先卸模型、再停服务。
+
+    结束进程树要连 runner 一起（ollama_llama_server.exe / llama-server.exe）——
+    只杀 ollama.exe 时 runner 可能还挂着显存，那也是"回弹"的一种。
+    """
     if not port_open(OLLAMA_PORT):
+        # 端口已关，但可能还有孤儿 runner 在占显存：一并收掉，保证干净
+        try:
+            import vram
+            vram.kill_model_runners()
+        except Exception as e:
+            log("（清理孤儿 runner 时忽略: {}）".format(e))
         return {"running": False, "stopped": False}
-    # 托盘版会看护 ollama.exe，两个都要结束，只杀一个会被拉回来
+    # ① 卸载全部驻留模型（强制路径：正在跑的推理也停）
+    unload_detail = ""
+    try:
+        import vram
+        ok, unload_detail, _unloaded = vram.unload_all_models_forced()
+        if not ok:
+            log("!! 关停前卸载模型未完全成功: {}".format(unload_detail))
+    except Exception as e:
+        unload_detail = "卸载步骤异常（忽略，继续关停）: {}".format(e)
+        log("!! " + unload_detail)
+    # ② 结束整棵进程树（托盘版会看护 ollama.exe，两个都要结束，只杀一个会被拉回来）
     for name in ("ollama app.exe", "ollama.exe"):
         run_capture(["taskkill", "/IM", name, "/F", "/T"], 15)
+    try:
+        import vram
+        vram.kill_model_runners()
+    except Exception:
+        pass
     if not wait_port(OLLAMA_PORT, False, 10):
         return {"running": True, "stopped": False, "error": "停止超时"}
-    return {"running": False, "stopped": True}
+    return {"running": False, "stopped": True, "detail": unload_detail}
+
+
+# ── ollama 独立服务（11437）─────────────────────────────────
+#
+# 为什么要有这一层：模型加载/卸载/状态原先由 dmb_server 提供，于是"管模型"这件事
+# 被绑死在 OCR/翻译服务上 —— dmb_server 一关就管不了模型。现在这些能力归 ollama 服务，
+# 与 dmb_server 互不依赖（2026-10-04 用户拍板）。
+
+def _request(method, port, path, timeout, body=None):
+    """向本机服务发一次 HTTP 请求，返回 (ok, 解析后的 JSON 或 None)。"""
+    url = "http://127.0.0.1:{}{}".format(port, path)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+        try:
+            return True, json.loads(raw)
+        except Exception:
+            return True, None
+    except Exception as e:
+        log("{} {} 失败: {}".format(method, url, e))
+        return False, None
+
+
+def start_ollama_service(port=OLLAMA_SERVICE_PORT):
+    """幂等启动 ollama 独立服务（它自己会拉起 ollama 引擎并清显存）。"""
+    if port_open(port):
+        return {"running": True, "started": False}
+    args = [python_launcher(), OLLAMA_SERVICE_APP, str(port)]
+    log("启动 ollama 服务: {}".format(" ".join(args)))
+    try:
+        launch_silent(args, HERE)
+    except Exception as e:
+        return {"running": False, "started": False, "error": str(e)}
+    if not wait_port(port, True, 60):
+        return {"running": False, "started": False,
+                "error": "ollama 服务启动超时（60s 内端口 {} 未就绪）".format(port)}
+    return {"running": True, "started": True}
+
+
+def stop_ollama_service(port=OLLAMA_SERVICE_PORT):
+    """关闭 ollama 独立服务：**先请它自己优雅收尾**（卸模型 + 停 ollama），再收掉进程。
+
+    不能直接 taskkill 服务进程 —— 那样就没机会先卸载模型，正是"回弹"的来源。
+    优雅通道走不通（服务没响应）时才退化：直接停 ollama 引擎 + 杀服务进程。
+    """
+    if not port_open(port):
+        # 服务没在跑：仍确保 ollama 引擎没被留下（口径：这个开关关了就全关）
+        engine = stop_ollama() if port_open(OLLAMA_PORT) else {"running": False, "stopped": False}
+        return {"running": False, "stopped": False, "engine": engine}
+    ok, payload = _request("POST", port, "/shutdown", 180, {})
+    graceful = bool(ok and (payload or {}).get("ok"))
+    if not graceful:
+        log("  优雅关停未确认，改走强制路径")
+        if port_open(OLLAMA_PORT):
+            stop_ollama()           # 兜底：卸模型 + 停引擎
+    pid = listen_pid(port)
+    if pid is not None:
+        run_capture(["taskkill", "/PID", str(pid), "/F", "/T"], 15)
+    if not wait_port(port, False, 15):
+        return {"running": True, "stopped": False, "error": "ollama 服务停止超时"}
+    return {"running": False, "stopped": True, "graceful": graceful}
