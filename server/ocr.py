@@ -60,6 +60,35 @@ def get_ocr():
     return _ocr, _ocr_error
 
 
+def preload_ocr():
+    """本地服务拉起后**立即预载** manga-ocr，别让第一个 OCR 请求干等。
+
+    ★ 为什么必须预载（2026-10-05 实测坐实）：
+      `get_ocr()` 是懒加载，首个 OCR 请求会「现场 import torch + 读 400MB 权重」。
+      实测这条链把**客户端** `await fetch` 拖到 **13 秒**
+      （14:43:58 `fetchResolved=13121ms` vs 服务端 `total_ms=743ms`；
+       14:46:59 = 13679ms vs 639ms；13:11:02 = 7078ms vs 436ms），
+      而热态缺口只有 2~7ms。更糟的是 `handle_ocr` 的 `total_ms` 只统计
+      「模型就绪之后」的那段 —— **那 13 秒在服务端日志里完全隐身**，
+      只看 `OCR 完成: N 行, 合计 743ms` 会误以为服务端很快。
+
+    · **幂等**：并发调用只有一个线程真正加载（`_ocr_lock` 保护），其余等它；
+      首请求若在预载完成前到达，`get_ocr()` 会复用同一次加载，不会加载两遍。
+    · 放**后台线程**调用即可 —— HTTP 服务先起来，`/health` 立刻可用。
+    · **作用域**：manga-ocr 与 ollama/LLM 模型**互不管辖**（2026-10-05 用户拍板：
+      「同时只能跑一个」的约束只针对 LLM 模型，切模型必须卸载当前 LLM；
+      OCR 模型归本地服务自己管）。这里不做任何显存清空动作，也**不要**去碰
+      `vram.py`（那是 Ollama runner 的专属通道，`kill_model_runners` 只 taskkill
+      `ollama_llama_server.exe` / `llama-server.exe`，本来就碰不到 manga-ocr）。
+    """
+    mocr, err = get_ocr()
+    if err:
+        log("!! manga-ocr 预载失败（首个 OCR 请求会重试加载）: {}".format(err))
+        return False
+    log("  manga-ocr 预载完成（ocr_loaded=True，首请求不再等加载）")
+    return True
+
+
 def decode_base64_image(data):
     """支持 `data:image/xxx;base64,....` 或纯 base64。返回 PIL.Image。"""
     from PIL import Image

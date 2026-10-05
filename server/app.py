@@ -15,6 +15,7 @@ v1 的 P0-C 修复：**先落盘，后响应**。v1 把 `_send(200,...)` 排在�
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -276,6 +277,21 @@ def main():
     banner()
     # 注意：本服务**不再**在启动时清显存 —— 那是 ollama 独立服务启动时的活。
     # （原先在这里卸模型，会让"启动 OCR/翻译服务"顺带动 ollama 的状态，正是要解开的耦合。）
+    #
+    # ★ 2026-10-05（用户拍板）：本服务拉起后**直接预载 manga-ocr**。
+    #   原因：ocr.get_ocr() 原本是懒加载，首个 OCR 请求要现场 import torch + 读 400MB 权重，
+    #   实测把客户端 await fetch 拖到 13 秒（14:43:58 fetchResolved=13121ms vs 服务端
+    #   total_ms=743ms），而热态缺口只有 2~7ms。
+    #   · 放**后台线程**：HTTP 先起来，/health 立刻可用，别让浏览器等模型加载才开服。
+    #   · 只管 manga-ocr 自己，**不碰 vram.py**（那是 Ollama runner 的专属通道），
+    #     也不动 LLM「同时只能跑一个 / 切模型要卸载」的规则 —— oilama 服务（11437）管的事。
+    #   · preload_ocr() 幂等（_ocr_lock 保护），首请求若在预载完成前到达会复用同一次加载，
+    #     不会加载两遍。
+    try:
+        threading.Thread(target=ocr_mod.preload_ocr, name="ocr-preload",
+                         daemon=True).start()
+    except Exception as e:  # 预载失败绝不能拖垮服务启动
+        log("!! manga-ocr 预载线程启动失败（改为懒加载，首个请求现场加载）: {}".format(e))
     srv = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     try:
         srv.serve_forever()
