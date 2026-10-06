@@ -114,7 +114,7 @@ def main():
         resp, dt = post(args.url, payload)
     except Exception as e:
         print(f"[FAIL] 请求 {args.url} 失败: {e}")
-        print("       （服务端没起来？先跑 scripts\\start_all.cmd，或确认 11436 在监听）")
+        print("       （服务端没起来？先跑 scripts\\start_server.cmd，或确认 11436 在监听）")
         return 1
 
     items = resp if isinstance(resp, list) else resp.get("results") or resp.get("images") or []

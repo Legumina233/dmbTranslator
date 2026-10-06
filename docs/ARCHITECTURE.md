@@ -2,6 +2,7 @@
 
 > 数据来源：`dmb-probe-report.json`（2026-10-01 17:12，exhentai，6 次翻页，44 个事件）
 > 探针：`probe/mainworld-probe`（MAIN world，Chrome MV3）
+> 注：这两样（以及 §六·补 的 `dmb-probe-report111.json`）都是一次性探针物，**验完即删、已从仓库移除**；本节引用的是当时的实测记录（要复现从归档分支取）。
 
 ---
 
@@ -63,11 +64,20 @@
 
 代价从 330 行降到约 100 行（sorz 的量级）。
 
+> **现状（2026-10-04 起）**：**没有**落地主世界脚本。`ehentaiMainWorld.js` 已不存在，
+> 实际方案是**隔离世界适配器 + 直连 `api.php` 的 showpage 预取**；
+> 现行实现见 `content/core/scheduler/prefetchChain.ts`、`prefetchExecutor.ts`、`showpageClient.ts`。
+> 本节保留的是当时的决策过程。
+
 ---
 
 ## 四、e-hentai adapter 设计（两层）
 
 ### L1a 主世界脚本 `ehentaiMainWorld.js`（不能用 `chrome.*`，只 `postMessage`）
+
+> **现状（2026-10-04 起）**：这个脚本**未落地**、已不存在 —— 现行实现是隔离世界适配器 +
+> 直连 `api.php` 的 showpage 预取（`content/core/scheduler/{prefetchChain,prefetchExecutor,showpageClient}.ts`）。
+> 本节保留当时的设计。
 
 职责只有三件：
 
@@ -105,7 +115,7 @@ pageKey = `${gid}-${page}`        例: "4218710-6"
 - **两端一致**：主世界生成；**服务端不再消费 pageKey**（整页配对机制已删，见 SERVER.md §七）——
   服务端只把它当普通请求字段忽略，不参与任何配对或校验
 
-该字段**必须写进数据模型真源表**，服务端与前端共用同一规则。
+该字段**必须写进数据模型真源表**；但它只是扩展侧的页身份 / 译图缓存键，服务端不消费、不配对、不校验。
 
 ---
 
@@ -152,7 +162,7 @@ pageKey = `${gid}-${page}`        例: "4218710-6"
 ```
 pageKey = `${gid}-${p}`       例: gid=4218710, p=129 → "4218710-129"
 ```
-`gid` 读 `window.gid`（实测 number）；`p` 取 showpage 响应的 `p` 字段。前后端共用此规则，服务端只透传。
+`gid` 读 `window.gid`（实测 number）；`p` 取 showpage 响应的 `p` 字段。此格式只用于扩展侧（页身份 / 译图缓存键）；服务端不消费、不配对、不校验。
 
 ---
 

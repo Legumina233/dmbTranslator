@@ -28,13 +28,13 @@ if HERE not in sys.path:
 import ocr as ocr_mod                                             # noqa: E402
 from backends import BackendError                                 # noqa: E402
 from config import (DEFAULT_OLLAMA_SERVICE_PORT, DEFAULT_PORT,     # noqa: E402
-                    GLOSSARY_FILE, LISTEN_HOST, SAKURA_MODEL, UPSTREAM,
-                    keep_alive)
+                    GLOSSARY_FILE, LISTEN_HOST, SAKURA_MODEL,
+                    SAKURA_PROMPT_FILE, UPSTREAM, keep_alive)
 from glossary import default_sakura_system, load_sakura_system     # noqa: E402
-from logging_ import (daily_log_path, log, trace_event,           # noqa: E402
-                     write_image_record)
+from logging_ import (daily_log_path, log)                         # noqa: E402
 from ocr import handle_ocr                                        # noqa: E402
-import pagelog                                                    # noqa: E402
+import eventlog                                                   # noqa: E402
+import support as support_mod                                     # noqa: E402
 from translate import (PipelineError, RequestContext,             # noqa: E402
                        assemble_translate_payload, handle_translate)
 from panel import SERVER_PANEL_HTML                               # noqa: E402
@@ -100,6 +100,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
+        # ★ M1：贯穿 ID **回显** —— 客户端拿到就能记进自己的事件，两侧按它对齐。
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(eventlog.REQUEST_ID_HEADER, rid)
         self.send_header("Content-Length", str(len(data)))
         self._cors()
         self.end_headers()
@@ -143,6 +147,9 @@ class Handler(BaseHTTPRequestHandler):
             obj = json.loads(body.decode("utf-8", "replace"))
         except Exception:
             return False
+        # ★ M1 贯穿 ID：与 /ocr 同一套规则（请求头带了就沿用，否则生成），由 `_send` 统一回显。
+        request_id = eventlog.resolve_request_id(self.headers)
+        self._request_id = request_id
         requested = obj.get("model") or SAKURA_MODEL
         target, backend = resolve_model(requested)
         messages = obj.get("messages") or []
@@ -163,9 +170,18 @@ class Handler(BaseHTTPRequestHandler):
             log("!! 翻译失败（已显式报错，不返回原文）: {}".format(e), model=target)
             self._send_json(502, {"error": {
                 "message": str(e), "type": "backend_error", "model": target}})
-            trace_event({"type": "translate", "mode": "error",
-                         "duration_ms": ctx.elapsed_ms(), "error": str(e),
-                         "stages": ctx.trace_stages()}, model=target)
+            # ★ M1：失败也是第一公民 —— 服务端自己留一条 `failure` 事件
+            # ★ M4：`.trace.jsonl` 已下线，分阶段耗时并入这里（原来另写一份 jsonl，
+            #   同一件事两处写、还要靠人比对，违背"1 条事件流"）。
+            eventlog.append_event({
+                "kind": "failure", "level": "error",
+                "requestId": request_id, "runId": request_id,
+                "where": {"repo": "server", "module": "app", "fn": "_handle_chat"},
+                "what": {"stage": "translate", "model": target, "retryable": True,
+                         "mode": "error", "stages": ctx.trace_stages()},
+                "err": {"type": "BackendError", "message": str(e)},
+                "dur_ms": ctx.elapsed_ms(),
+            })
             return True
 
         # 服务端侧耗时明细：与 trace.jsonl 里的 stages 同一份（sakura_*/ollama_*/tokens）
@@ -173,18 +189,33 @@ class Handler(BaseHTTPRequestHandler):
             "total_ms": ctx.elapsed_ms(),
             "unload_other_ms": ctx.unload_ms or 0,
             "stages": ctx.trace_stages(),
+            "requestId": request_id,   # ★ 贯通 ID：回到扩展，被记进 page.completed 事件
         })
 
         # ★ 先落盘，后响应（P0-C）
-        # 2026-10-04 用户拍板：整页「配对」机制已删 —— 它在真机从未生效（扩展两端都不带
-        # pageKey，481 条真机记录全是 none(no pageKey)）。归档本身保留：翻译侧照旧落一条，
-        # OCR 侧不再落（那是没配对的纯噪音）。详见 docs/SERVER.md §七。
         payload = assemble_translate_payload(ctx, result.translate_list)
-        write_image_record(payload, model=target)
-        trace_event({"type": "translate", "mode": result.mode,
-                     "regions": result.region_count,
-                     "duration_ms": ctx.elapsed_ms(), "stages": ctx.trace_stages()},
-                    model=target)
+        # M4：`.image.jsonl` 独立出口已下线。它的内容是**原文+译文**（Q4 排「翻译质量差」
+        # 才需要），所以按设计 §5 归入 **L1 详细层**：
+        #   * 默认**不写** —— 「默认日志不含原文」是对用户的承诺，用户才敢把日志发出去；
+        #   * 要排翻译质量时临时开 `DMB_EVENT_LOG_VERBOSE=1`，它才作为 `log.verbose` 事件
+        #     进同一条事件流（不再另起一个 jsonl 文件）。
+        if eventlog.verbose_enabled():
+            eventlog.append_event({
+                "kind": "log.verbose", "level": "debug",
+                "requestId": request_id,
+                "where": {"repo": "server", "module": "app", "fn": "_handle_chat"},
+                "what": {"stage": "translate.payload", "payload": payload},
+            })
+        # M1：服务端自己在统一事件流里留一条（与扩展侧那条可按 requestId 对齐）
+        # M4：分阶段耗时并入这里（原 `.trace.jsonl` 已下线）。
+        eventlog.append_event({
+            "kind": "llm.call", "level": "info",
+            "requestId": request_id,
+            "where": {"repo": "server", "module": "app", "fn": "_handle_chat"},
+            "what": {"model": target, "mode": result.mode, "regions": result.region_count,
+                     "total_ms": ctx.elapsed_ms(), "unload_other_ms": ctx.unload_ms or 0,
+                     "stages": ctx.trace_stages()},
+        })
         log(">>> 已返回 {} 结果 ({} region, {} ms)".format(
             result.mode, result.region_count, ctx.elapsed_ms()), model=target)
         self._send(200, data, ctype)
@@ -208,8 +239,36 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/health"):
             self._send_json(200, self._health())
             return
+        if self.path.startswith("/support"):
+            # M3 · 支持包（日志体系重构 §4.2）：扩展的弹窗调它拿 events+summary+server，
+            # 再补上自己的 env/settings 拼成单文件 JSON。
+            # 事件真正的家在服务端（扩展侧缓冲 500ms 就 flush 走了），所以由这里出。
+            limit = support_mod.DEFAULT_EVENT_LIMIT
+            tail = support_mod.DEFAULT_TAIL_LINES
+            try:
+                from urllib.parse import parse_qs, urlparse
+                query = parse_qs(urlparse(self.path).query)
+                if query.get("limit"):
+                    limit = max(1, min(5000, int(query["limit"][0])))
+                if query.get("tail"):
+                    tail = max(0, min(500, int(query["tail"][0])))
+            except Exception:
+                # 参数坏不该让"导出"整体失败 —— 用默认值继续。
+                limit = support_mod.DEFAULT_EVENT_LIMIT
+                tail = support_mod.DEFAULT_TAIL_LINES
+            self._send_json(200, support_mod.build_support_payload(
+                health=self._health(), limit=limit, tail_lines=tail,
+                exporter={"repo": "dmb-server", "commit": None}))
+            return
         if self.path in ("/", "/index.html", "/panel"):
             self._send(200, SERVER_PANEL_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            return
+        if self.path.startswith("/log/"):
+            # 同 do_POST：`/log/` 是本服务的命名空间，不许 passthrough 出去变成 502。
+            self._send_json(404, {
+                "error": "未知的日志端点（M4 起只有 /log/events，且它是 POST）",
+                "path": self.path,
+            })
             return
         self._passthrough(None, "GET")
 
@@ -218,20 +277,46 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(length) if length else b""
 
         if self.path.startswith("/ocr"):
-            status, obj, timing = handle_ocr(body)
+            # ★ M1 贯穿 ID：请求头带了就沿用，没带就服务端生成；**两种情况都回显**。
+            request_id = eventlog.resolve_request_id(self.headers)
+            status, obj, timing = handle_ocr(body, request_id=request_id)
             self._send_json(status, obj, extra_headers=(
-                {"X-DMB-Timing": json.dumps(timing, ensure_ascii=False)} if timing else None))
+                {"X-DMB-Timing": json.dumps(timing, ensure_ascii=False),
+                 eventlog.REQUEST_ID_HEADER: request_id} if timing
+                else {eventlog.REQUEST_ID_HEADER: request_id}))
             return
-        if self.path.startswith("/log/page"):
-            # 整页日志：扩展组装好一条完整记录后 POST 过来（零配对、单一数据源）。
+        if self.path.startswith("/log/events"):
+            # 统一事件流 —— **现在它是唯一的事件落点**（M4 起）。
+            # 曾经的并存方 `/log/page`（整页日志独立系统）已下线：它的记录口径搬进了
+            # `page.completed` / `failure` 事件（`stages` / `total_ms` / L1 的 `lines`）。
             try:
-                rec = json.loads(body.decode("utf-8", "replace")) if body else {}
+                payload = json.loads(body.decode("utf-8", "replace")) if body else {}
             except Exception as e:
                 self._send_json(400, {"error": "JSON 解析失败: {}".format(e)})
                 return
-            ok, detail = pagelog.append_page_record(rec)
+            request_id = eventlog.resolve_request_id(self.headers)
+            self._request_id = request_id
+            raw_events = payload.get("events") if isinstance(payload, dict) else payload
+            if isinstance(raw_events, list):
+                # 事件自带 requestId 优先（那是发起方生成的）；没带的用本次请求的 ID 兜底，
+                # 免得这批事件在服务端日志里变成"无主"、对不上任何一次调用。
+                for item in raw_events:
+                    if isinstance(item, dict) and not item.get("requestId"):
+                        item["requestId"] = request_id
+            ok, detail, written = eventlog.append_events(payload)
             self._send_json(200 if ok else 500,
-                            {"ok": ok, "detail": detail, "path": pagelog.page_log_path()})
+                            {"ok": ok, "detail": detail, "written": written,
+                             "path": eventlog.event_log_path()})
+            return
+        if self.path.startswith("/log/"):
+            # `/log/` 是本服务的命名空间，**不能落到 passthrough** ——
+            # 那会把它转发给 Ollama，返回一个 502，看起来像"服务故障"，
+            # 排查的人会先去查服务是不是挂了；而真相是这个端点已经不存在了。
+            # M4 起只有 `/log/events`（整页日志的 `/log/page` 已下线）。
+            self._send_json(404, {
+                "error": "未知的日志端点（M4 起只有 /log/events）",
+                "path": self.path,
+            })
             return
         if self.path.startswith("/health"):
             self._send_json(200, self._health())
@@ -254,21 +339,23 @@ def _ensure_glossary():
 
 
 def banner():
-    custom = os.path.exists(os.path.join(HERE, "sakura_prompt.txt")) and \
-        load_sakura_system(SAKURA_MODEL).strip() != default_sakura_system(SAKURA_MODEL).strip()
+    # 是否用了自定义 system 提示词：直接比"生效值 vs 按模型版本自动选的值"。
+    # 不再单独 os.path.exists 判一次 —— load_sakura_system 本来就在文件缺失/只有注释时回落默认，
+    # 两个条件叠着写只会多一个会漂移的路径字面量。
+    custom = load_sakura_system(SAKURA_MODEL).strip() != default_sakura_system(SAKURA_MODEL).strip()
     log("=" * 60)
     log("dmbTranslator v2 本地服务已启动: http://{}:{}".format(LISTEN_HOST, LISTEN_PORT))
     log("  翻译端点  Shinobu Base URL 填 http://127.0.0.1:{}/v1".format(LISTEN_PORT))
     log("  OCR 端点  http://127.0.0.1:{}/ocr  （manga-ocr，本地 GPU）".format(LISTEN_PORT))
     log("  转发上游  {}".format(UPSTREAM))
     log("  默认模型  {}   keep_alive={}".format(SAKURA_MODEL, keep_alive()))
-    log("  Sakura提示  {}".format("自定义文件" if custom else "按模型版本自动选择"))
+    log("  Sakura提示  {}  （覆盖文件 {}）".format(
+        "自定义正文" if custom else "按模型版本自动选择", SAKURA_PROMPT_FILE))
     log("  模型/ollama 控制  → 已拆到独立服务 http://{}:{}".format(
         LISTEN_HOST, DEFAULT_OLLAMA_SERVICE_PORT))
     log("  日志目录  {}  (按模型分子目录，每天一个文件)".format(
-        os.path.dirname(daily_log_path("log", SAKURA_MODEL))))
-    log("  当天日志  {}".format(daily_log_path("log", SAKURA_MODEL)))
-    log("  整页日志  {}".format(daily_log_path("image", SAKURA_MODEL)))
+        os.path.dirname(daily_log_path(SAKURA_MODEL))))
+    log("  当天日志  {}".format(daily_log_path(SAKURA_MODEL)))
     log("=" * 60)
 
 

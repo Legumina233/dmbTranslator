@@ -13,6 +13,8 @@ Sakura 是按官方语料训练的**专用**翻译模型：把通用指令（"�
 
   1. **消息只留两条**：`system` = 官方提示词；`user` = 官方模板文本。
      Shinobu 带来的任何其它 system/指令一律**丢弃**。
+     `system` 可被 `server/sakura_prompt.txt` 覆盖（写正文即生效，删正文回自动选），
+     判定与读取都只走 `system_prompt()` → `glossary.load_sakura_system()` 这一条路。
   2. **user 文本按官方模板拼**：有术语表用术语表版（`原文->译文` 行 + 官方固定尾句），
      没有则用简版固定句式。**句式一个字都不能改**。
   3. **生成参数用官方推荐值**：`temperature=0.1 / top_p=0.3 / repeat_penalty=1.0`。
@@ -24,8 +26,7 @@ Sakura 是按官方语料训练的**专用**翻译模型：把通用指令（"�
 """
 import re
 
-from config import SAKURA_SYSTEM_V1_0, SAKURA_SYSTEM_V1_5
-from glossary import build_user_prompt
+from glossary import build_user_prompt, load_sakura_system
 
 # ── 官方推荐生成参数（来自 SakuraLLM 官方用法 / v1 legacy 适配器实测配置）──
 OFFICIAL_OPTIONS = {
@@ -45,11 +46,16 @@ _MULTI_BLANK = re.compile(r"\n{3,}")
 
 
 def system_prompt(model):
-    """官方 system 提示词。v1.5 系（含 v1.5/qwen3/galtransl）与 v1.0 系不同。"""
-    name = (model or "").lower()
-    if "v1.5" in name or "v15" in name or "qwen3" in name or "galtransl" in name:
-        return SAKURA_SYSTEM_V1_5
-    return SAKURA_SYSTEM_V1_0
+    """官方 system 提示词：优先 `server/sakura_prompt.txt` 的正文，否则按模型版本自动选。
+
+    ★ 2026-10-05 修复：本函数原先**自己抄了一份版本判定**（与 `glossary.default_sakura_system`
+      逐字相同）并且**从不读覆盖文件** —— 于是 `sakura_prompt.txt` 成了死开关：
+      改它只影响启动 banner 那行字，译文一字不变（重构后旧路径没删干净的遗留）。
+
+    现在唯一实现在 `glossary.load_sakura_system()`（读文件 → 只含注释则按模型版本自动选，
+    且天然热重载），本函数只保留"翻译适配层"这一个名字，避免第二份判定将来漂移。
+    """
+    return load_sakura_system(model)
 
 
 def normalize_japanese(text):

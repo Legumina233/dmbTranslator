@@ -54,16 +54,20 @@ OCR_LOW_CONF_LOG = 0.5
 OCR_BATCH_SIZE = 12
 
 # ── 调试 ────────────────────────────────────────────────
-TRACE_ENABLED = os.environ.get("DMB_TRACE", "1") != "0"
+# 分阶段耗时追踪没有开关了：`.trace.jsonl` 已于 M4 下线，耗时并入事件流
+# （`llm.call` / `failure` 的 `what.stages`），整体开关是 `DMB_EVENT_LOG`。
 DEBUG_DUMP = os.environ.get("DMB_DEBUG", "0") == "1"
 
 # ── 显存驻留策略 ────────────────────────────────────────────
 # Ollama 默认在最后一次调用后静默 keep_alive=5min 卸载模型。v1 就是这样：
 # 选完模型放着不动，5 分钟后被悄悄卸掉，下次翻译又要冷加载 3~6s，
 # 而且"已加载/未加载"对用户完全不可见。
-# v2 默认改为 -1 = 永不过期，卸载**只由显式 /model/unload 触发**。
-# 想恢复自动卸载：设 DMB_KEEP_ALIVE=5m（或 300 / 0 等）。
-KEEP_ALIVE_RAW = os.environ.get("DMB_KEEP_ALIVE", "-1")
+# v2 一度改成 -1 = 永不过期（卸载只由显式 /model/unload 触发）；
+# 2026-10-06 用户拍板**恢复自动卸载**，TTL 取 15 分钟。
+# 语义：最后一次调用起算，15 分钟没有新请求 → Ollama 自动卸载该模型；
+# 之后再翻译**无需手动加载**，请求会触发 Ollama 自动冷加载（约 3~6s）。
+# 想改时长：设 DMB_KEEP_ALIVE=5m / 300 / 0（立即卸）/ -1（永不过期）。
+KEEP_ALIVE_RAW = os.environ.get("DMB_KEEP_ALIVE", "15m")
 
 
 def keep_alive():

@@ -14,6 +14,8 @@
 
 ## 当前改动面（2026-10-01）
 
+> ⚠️ 这是 **2026-10-01 当时的快照**。此后 shinobu 又累计了 M0–M4 等大量改动（见本文件下半部分与 `ROLLBACK-NOTE.md`）。
+
 ```
  apps/extension/src/popup/App.tsx                   | 496 ++++---------
  apps/extension/src/shared/config.ts                |  13 +-
@@ -101,8 +103,10 @@
 > 的派生结果（手册 §3.4：派生的一律不存）。切到本地 = 写 `llmProvider='custom'` + 本机 Base URL；
 > 切回在线 = 恢复到一个内置提供商（取内置目录第一项，即 `deepseek`）。
 
-**没有改** `packages/` 下任何文件。**没有改** manifest（`host_permissions` 本就是 `<all_urls>`，
-popup 直接 fetch `http://127.0.0.1:11436` 合法）。
+> ★ 这里原写的「**没有改** `packages/` 下任何文件。**没有改** manifest」**只针对 P2/P4 那一轮**：
+> P4 自身确实没动 `packages/`、没动 manifest。但 P3 起就已改过 `packages/`（见上面的改动面表），
+> manifest 后来也改了 —— 扩展加了 `nativeMessaging` 权限（`apps/extension/manifest.ts`）；
+> `host_permissions` 本就是 `<all_urls>`，popup 直接 fetch `http://127.0.0.1:11436` 合法。
 
 ### P5 · 只读审查后的修复轮
 

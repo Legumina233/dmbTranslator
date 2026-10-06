@@ -8,7 +8,6 @@
     任何拿不到有效译文的路径都必须抛 BackendError。
 """
 import json
-import math
 import time
 import urllib.error
 import urllib.request
@@ -19,9 +18,6 @@ from config import (BATCH_TRANSLATE, DEBUG_DUMP, QWEN_LINES_SYSTEM,
 from logging_ import log
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-STAGE_KEYS = ("prefill_ms", "generate_ms", "prompt_eval_ms", "eval_ms", "load_ms", "total_ms")
-TOKEN_KEYS = ("prompt_tokens", "output_tokens", "input_chars", "output_chars")
 
 
 class BackendError(Exception):
@@ -181,12 +177,17 @@ class SakuraBackend(Backend):
 
         norm = [sakura.normalize_japanese(x) for x in lines]
         out = [None] * len(norm)
+        # 哪些条目是"不可译、没送过模型"的 —— 它们不参与下面的空值断言。
+        # （2026-10-05 修复：原文只剩零宽字符时 norm[i] 会是空串，旧实现把它当模型的
+        #   "空译文"撞上 `_finalize` 的断言 → 一行脏输入让整页 502。）
+        passthrough = [False] * len(norm)
 
         # 1) 不可译的原地返回，不打扰模型
         pending = []
         for i, s in enumerate(norm):
             if not s or not sakura.has_translatable(s):
                 out[i] = s
+                passthrough[i] = True
             else:
                 pending.append(i)
 
@@ -221,12 +222,12 @@ class SakuraBackend(Backend):
                     model=ctx.model)
                 done = True
             if done:
-                return [_finalize(v, norm[i]) for i, v in enumerate(out)]
+                return _finalize_all(out, norm, passthrough)
 
         # 3) 逐条
         for i in pending:
             out[i] = self._one(norm[i], ctx)
-        return [_finalize(v, norm[i]) for i, v in enumerate(out)]
+        return _finalize_all(out, norm, passthrough)
 
 
 def _finalize(v, fallback_norm):
@@ -234,6 +235,22 @@ def _finalize(v, fallback_norm):
     if v is None or not str(v).strip():
         raise BackendError("译文中出现空值（原文: {}）".format((fallback_norm or "")[:60]))
     return str(v).strip()
+
+
+def _finalize_all(values, norm, passthrough):
+    """逐条收口。
+
+    · 送过模型的条目 → `_finalize`（空值必须显式失败）；
+    · 不可译的条目（`passthrough[i]`）→ 原样返回，**不做空值断言** ——
+      它们从没送过模型，不存在"模型返回空译文"这回事；规范化后为空就是空。
+    """
+    out = []
+    for i, v in enumerate(values):
+        if passthrough[i]:
+            out.append("" if v is None else v)
+        else:
+            out.append(_finalize(v, norm[i]))
+    return out
 
 
 class GenericBackend(Backend):
@@ -279,10 +296,3 @@ def stage_to_trace(stage):
         "input_chars": s.get("input_chars", 0),
         "output_chars": s.get("output_chars", 0),
     }
-
-
-def ppl_geomean(logprobs):
-    """伪置信度：对数概率几何平均。抽成纯函数便于单测。"""
-    if not logprobs:
-        return 0.0
-    return max(0.0, min(1.0, math.exp(sum(logprobs) / len(logprobs))))

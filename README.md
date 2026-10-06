@@ -30,9 +30,8 @@
 | `manga-ocr/` | vendor 的 manga-ocr 源码（只取识别部分，靠 `sys.path` 挂载，未 pip 安装） |
 | `server/` | 本地服务：`app.py`（OCR + 翻译，11436）+ `ollama_server.py`（ollama 与模型控制，11437） |
 | `scripts/` | 启动 / 停止 / 预检 / 冒烟 / 单测脚本 |
-| `probe/` | Phase 1 决定性实验用的浏览器探针（临时，验完即删） |
 | `docs/` | 交接手册（含 v0.4.x 各版附节）、`SERVER.md`、`ARCHITECTURE.md`、`UPSTREAM_PATCHES.md`、三份阶段审计报告等 |
-| `logs/` | 运行日志，按 `<模型名>/YYYY-MM-DD.*` |
+| `logs/` | 运行日志：`logs/<模型名>/YYYY-MM-DD.log`（控制台镜像）+ **统一事件流** `logs/events/YYYY-MM-DD.events.jsonl`（排障首选） |
 
 ## 当前进度
 
@@ -71,8 +70,8 @@ scripts\test_ocr.cmd
 | 环境预检 `scripts/preflight.py` | ✅ FAIL=0（22 项） |
 | `npm run typecheck:extension` | ✅ 通过 |
 | `npm run build:extension:chromium` | ✅ vite 打包成功，产物齐（content 288K / onnxWorker 812K / popup 173K / models 随包） |
-| 服务端纯函数单测 `scripts/test_pure.py` | ✅ **27/27** |
-| 服务端端到端 `scripts/test_server.py` | 5 条路径（OCR / 翻译 / 归档落盘 / 结构化 regions / 失败显式报错）；**需服务端 + Ollama 在跑**，跑之前先 `scripts\start_server.cmd` |
+| 服务端纯函数单测 `scripts/test_pure.py`（2026-10-05 复测） | ✅ **30/30** |
+| 服务端端到端 `scripts/test_server.py`（2026-10-05 复测） | 7 项检查（T1 健康 / T2 OCR / T3 简版翻译 / T3b requestId 回显 / T3c 事件流落盘 / T4 结构化 regions / T5 失败显式报错）；**需服务端 + Ollama 在跑**，跑之前先 `scripts\start_server.cmd` |
 | 模型加载/卸载接口 | ✅ 卸载→`(无)`；加载→5.7s、`keep_alive=-1`、8290 MB 驻留 |
 
 ## 模型控制面板
@@ -87,9 +86,9 @@ scripts\start_ollama.cmd
 可**显式加载/卸载**模型，并显示驻留明细与显存占用、启停 ollama 引擎。
 （11436 那个页面只管 OCR / 翻译服务的健康检查与接口索引 —— 模型控制已随 v0.4.3 拆到 11437。）
 
-> **驻留策略已改**：Ollama 默认静默 5 分钟卸载模型，v2 默认 `keep_alive=-1`（永不过期），
-> 卸载只由 `/model/unload` 触发。要恢复自动卸载：`set DMB_KEEP_ALIVE=5m`。
-> 详见 `docs/SERVER.md`。
+> **驻留策略**：当前 `keep_alive = 15m`（2026-10-06 恢复自动卸载）。最后一次调用后 15 分钟无请求，
+> Ollama 自动卸载模型；**之后翻译无需手动加载**，请求会自动冷加载（约 3~6 s）。
+> 改时长：`set DMB_KEEP_ALIVE=5m`（`300` / `0` 立即卸 / `-1` 永不过期）。详见 `docs/SERVER.md`。
 
 ## 已知环境问题
 

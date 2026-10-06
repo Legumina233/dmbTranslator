@@ -36,15 +36,29 @@ if os.environ.get("DMB_HF_MIRROR", "1") != "0":
 _ocr_lock = threading.Lock()
 _ocr = None
 _ocr_error = None
+_ocr_error_at = 0.0          # 上次加载失败的时刻（用于冷却重试）
+# 加载失败的**冷却期**：期间直接返回上次的错误（不重试），冷却过后允许再试一次。
+# 为什么必须有这个重试：加载失败最常见的原因是**显存竞争**（ollama 正在加载大模型，
+# 见 docs 里的 keep_alive=-1 口径），等几秒就好了。而旧的实现把错误**永久缓存** ——
+# 一次抢显存失败 = 这个服务进程活着的期间每一页 OCR 都 503，
+# 真机事故（2026-10-05 23:19）：日志写着"首个 OCR 请求会重试加载"，实际永不重试。
+OCR_RELOAD_COOLDOWN_S = 15.0
 
 
 def get_ocr():
-    """懒加载 manga-ocr（首次会加载约 400 MB 模型）。返回 (mocr, error)。"""
-    global _ocr, _ocr_error
-    if _ocr is not None or _ocr_error is not None:
-        return _ocr, _ocr_error
+    """懒加载 manga-ocr（首次会加载约 400 MB 模型）。返回 (mocr, error)。
+
+    · 成功后缓存实例；**失败不粘滞** —— 冷却 `OCR_RELOAD_COOLDOWN_S` 过后，下一个调用
+      会再试一次（加载本身在 `_ocr_lock` 里串行，不会并发加载两遍）。
+    · 冷却期内直接返回上次错误：失败时每个请求都去 CUDA init 一遍会又慢又吵。
+    """
+    global _ocr, _ocr_error, _ocr_error_at
+    if _ocr is not None:
+        return _ocr, None
     with _ocr_lock:
-        if _ocr is not None or _ocr_error is not None:
+        if _ocr is not None:
+            return _ocr, None
+        if _ocr_error is not None and (time.time() - _ocr_error_at) < OCR_RELOAD_COOLDOWN_S:
             return _ocr, _ocr_error
         try:
             from manga_ocr import MangaOcr
@@ -53,14 +67,16 @@ def get_ocr():
             log("正在加载 manga-ocr（模型: {}）...".format(model_path))
             t0 = time.time()
             _ocr = MangaOcr(pretrained_model_name_or_path=model_path)
+            _ocr_error = None
             log("manga-ocr 就绪，耗时 {:.1f}s".format(time.time() - t0))
         except Exception as e:
             _ocr_error = "{}: {}".format(type(e).__name__, e)
+            _ocr_error_at = time.time()
             log("!! manga-ocr 加载失败: {}".format(_ocr_error))
     return _ocr, _ocr_error
 
 
-def preload_ocr():
+def preload_ocr(attempts=3, delay_s=20.0):
     """本地服务拉起后**立即预载** manga-ocr，别让第一个 OCR 请求干等。
 
     ★ 为什么必须预载（2026-10-05 实测坐实）：
@@ -74,6 +90,11 @@ def preload_ocr():
 
     · **幂等**：并发调用只有一个线程真正加载（`_ocr_lock` 保护），其余等它；
       首请求若在预载完成前到达，`get_ocr()` 会复用同一次加载，不会加载两遍。
+    · **失败会重试**（`attempts` 次、间隔 `delay_s`）：加载失败最常见的原因是
+      **显存竞争**（ollama 正在加载大模型 —— 真机事故 2026-10-05 23:19：预载刚好
+      撞上 sakura-14b-qwen3-v1.5 的显式加载 → CUDA OOM → 旧实现把错误永久缓存 →
+      之后每一页都在 OCR 站失败，表现成"翻译坏了"）。抢显存是瞬时的，等一会儿再试
+      就能成功；一次失败就放弃，代价是整场翻译全废。
     · 放**后台线程**调用即可 —— HTTP 服务先起来，`/health` 立刻可用。
     · **作用域**：manga-ocr 与 ollama/LLM 模型**互不管辖**（2026-10-05 用户拍板：
       「同时只能跑一个」的约束只针对 LLM 模型，切模型必须卸载当前 LLM；
@@ -81,12 +102,18 @@ def preload_ocr():
       `vram.py`（那是 Ollama runner 的专属通道，`kill_model_runners` 只 taskkill
       `ollama_llama_server.exe` / `llama-server.exe`，本来就碰不到 manga-ocr）。
     """
-    mocr, err = get_ocr()
-    if err:
-        log("!! manga-ocr 预载失败（首个 OCR 请求会重试加载）: {}".format(err))
-        return False
-    log("  manga-ocr 预载完成（ocr_loaded=True，首请求不再等加载）")
-    return True
+    for attempt in range(1, max(1, attempts) + 1):
+        mocr, err = get_ocr()
+        if not err:
+            log("  manga-ocr 预载完成（ocr_loaded=True，首请求不再等加载）")
+            return True
+        if attempt < attempts:
+            log("!! manga-ocr 预载失败（第 {}/{} 次）: {}；{:.0f}s 后重试".format(
+                attempt, attempts, err.splitlines()[0], delay_s))
+            time.sleep(delay_s)
+    log("!! manga-ocr 预载最终失败（{} 次）。后续每个 OCR 请求会在 {:.0f}s 冷却后"
+        "各自重试一次加载: {}".format(attempts, OCR_RELOAD_COOLDOWN_S, err.splitlines()[0]))
+    return False
 
 
 def decode_base64_image(data):
@@ -307,12 +334,16 @@ def ocr_batch(mocr, items):
         return fallback()
 
 
-def handle_ocr(body):
+def handle_ocr(body, request_id=None):
     """POST /ocr → (status, obj, timing)。
 
     识别结果直接返回（**不落归档**：2026-10-04 起不再写）。
     `timing` = 本服务自己测的耗时（total_ms / infer_ms / lines），由路由写进响应头
     `X-DMB-Timing` —— 供扩展组装"整页日志"时把服务端侧耗时一并记上。
+
+    ★ M1：`request_id` 是**贯穿 ID**（设计 §6）—— 由路由从请求头解析或生成后传进来，
+    这里把它①塞进 `timing`（扩展侧记进自己的事件）②写进本服务那条 `ocr.call` 事件。
+    于是"扩展侧 page.completed"与"服务端 ocr.call"能按同一个 ID 对齐。
     """
     import json
     try:
@@ -323,6 +354,10 @@ def handle_ocr(body):
     images = obj.get("images") or []
     if not images:
         return 400, {"error": "缺少 images 字段"}, None
+
+    if request_id is None:
+        import eventlog
+        request_id = eventlog.new_request_id()
 
     mocr, err = get_ocr()
     if err:
@@ -358,12 +393,27 @@ def handle_ocr(body):
             results.append({"id": rid, "text": text, "confidence": round(conf, 4)})
 
     total_ms = int(round((time.time() - t0) * 1000))
-    log("OCR 完成: {} 行, 合计 {} ms（推理 {} ms）".format(
-        len(prepared), total_ms, int(round(infer_total * 1000))))
+    log("OCR 完成: {} 行, 合计 {} ms（推理 {} ms）[{}]".format(
+        len(prepared), total_ms, int(round(infer_total * 1000)), request_id))
     timing = {
         "total_ms": total_ms,
         "infer_ms": int(round(infer_total * 1000)),
         "lines": len(prepared),
+        "requestId": request_id,   # ★ 贯穿 ID：随响应头回到扩展，被记进 page.completed 事件
     }
+    # M1：服务端自己在统一事件流里留一条（与扩展侧那条可按 requestId 对齐）
+    try:
+        import eventlog
+        eventlog.append_event({
+            "kind": "ocr.call", "level": "info",
+            "requestId": request_id,
+            "where": {"repo": "server", "module": "ocr", "fn": "handle_ocr"},
+            "what": {"lines": len(prepared), "total_ms": total_ms,
+                     "infer_ms": int(round(infer_total * 1000)),
+                     "engine": "manga_ocr_server"},
+        })
+    except Exception as e:
+        # 日志是旁路：写不进去绝不影响识别结果
+        log("（ocr 事件落盘忽略: {}）".format(e))
     # 不落归档（2026-10-04 用户拍板）：整页配对已删，OCR 记录成了没配对的纯噪音。
     return 200, results, timing

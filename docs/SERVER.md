@@ -2,21 +2,26 @@
 
 > 启动：`scripts\start_server.cmd`（默认 11436） 　控制面板：<http://127.0.0.1:11436/>
 
-## 一、文件职责（v1 的单文件 1543 行拆成 10 个）
+## 一、文件职责（v1 的单文件 1543 行拆成 16 个 .py，2555 行）
 
 | 文件 | 职责 |
 |---|---|
 | `app.py` | 入口 + HTTP 路由（**OCR + 翻译**）。**只做 route → service**；模型/ollama 控制已拆走（见 §七） |
 | `ollama_server.py` | ★ **独立服务（11437）**：启停 ollama 引擎 + 模型加载/卸载/状态。与 app.py 零依赖 |
 | `config.py` | 不可变配置。**任何请求级数据都不许放这里** |
-| `logging_.py` | 运行日志 / trace.jsonl / image.jsonl |
+| `logging_.py` | 运行日志 `.log`（**控制台镜像**；M4 起 `trace.jsonl` / `image.jsonl` 已下线，见 §七） |
+| `eventlog.py` | 统一事件流：唯一落点、requestId 贯穿、L1 详细层开关 |
+| `support.py` | `GET /support` 支持包：读最近事件 + 现场算 summary + 服务端日志尾部 |
 | `glossary.py` | 术语表热重载 + Sakura user prompt 拼装 |
 | `sakura.py` | ★ **Sakura 适配层**：把通用请求规范成官方训练格式 |
 | `backends.py` | 后端策略对象（Sakura / Generic）+ `BackendError` |
 | `translate.py` | `RequestContext` + **唯一**翻译管线 |
 | `ocr.py` | manga-ocr 加载 / 单张 / 批量 |
 | `vram.py` | 模型解析、显存互斥、显式加载/卸载 |
-| `panel.py` | 自带控制面板单页（加载/卸载按钮） |
+| `panel.py` | 自带页面**两张**：11436 服务页（健康 + 接口索引，无模型按钮）+ 11437 模型控制页（加载/卸载按钮在这里） |
+| `service_control.py` | 本机服务 / Ollama 的静默启停、端口探活、进程树收尾 |
+| `native_host.py` | Native Messaging 宿主：扩展点开关时代为启停本机服务 |
+| `nm_launcher.py` | 被编译成无窗口 exe 的 NM 启动器；宿主清单指向它才不经 cmd.exe |
 
 ## 二、Sakura 适配层（`sakura.py`）—— 为什么必须有
 
@@ -41,9 +46,14 @@ Sakura 是按官方语料训练的**专用**翻译模型。把通用指令（"�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/ocr` | `{images:[{id,data(base64),direction}]}` → `[{id,text,confidence}]` |
-| POST | `/v1/chat/completions` | OpenAI 兼容。`{model, messages, stream}` |
-| GET | `/v1/models` | 透传 Ollama `/api/tags`，前端下拉据此列出 |
+| POST | `/v1/chat/completions` | OpenAI 兼容。`{model, messages, stream}`（`/api/chat` 同源入口） |
 | GET | `/health` | 健康检查（不触发模型加载） |
+| GET | `/support` | 支持包：读最近事件 + 现场算 summary + 服务端日志尾部 |
+| POST | `/log/events` | 统一事件流落盘（唯一事件落点） |
+| GET | `/` | 自带说明页（`/panel`、`/index.html` 同页） |
+
+**其余路径原样转发 Ollama 11434**（`/log/*` 是本服务命名空间：未知端点直接 404，不转发）。
+`GET /v1/models` 不在本服务 —— 见 §三·3.2。
 
 `messages` 的 user 文本支持三种形态，`translate.classify_input` 自动分流：
 
@@ -57,7 +67,8 @@ Sakura 是按官方语料训练的**专用**翻译模型。把通用指令（"�
 
 模型加载/卸载/状态**不再由本服务提供** —— 本服务只做 OCR + 翻译。
 控制接口在 `ollama_server.py`（11437）：`GET /model/status`、`POST /model/load`、
-`POST /model/unload`、`POST /model/unload-all`、`POST /service/start|stop`、`GET /`（控制面板）。
+`POST /model/unload`、`POST /model/unload-all`、`POST /service/start|stop`、`GET /v1/models`
+（OpenAI 格式的模型列表）、`GET /`（控制面板）。
 详见 §七。
 
 > ★ **模型互斥**：16 GB 显存装不下两个模型。`load_model()` 会先卸载除目标外的全部驻留模型，
@@ -69,8 +80,13 @@ Sakura 是按官方语料训练的**专用**翻译模型。把通用指令（"�
 Ollama 默认在最后一次调用后 **静默 5 分钟卸载**模型 —— v1 就是这样：选完模型放着不动，
 5 分钟后被悄悄卸掉，下次翻译又要冷加载 3~6 s，而且"已加载/未加载"对用户完全不可见。
 
-v2 默认 `keep_alive = -1`（**永不过期**），卸载**只由显式 `/model/unload` 触发**。
-想恢复自动卸载：`set DMB_KEEP_ALIVE=5m`。
+v2 一度改为 `keep_alive = -1`（**永不过期**），卸载只由显式 `/model/unload` 触发；
+**2026-10-06 用户拍板恢复自动卸载，TTL = 15 分钟**。
+
+- 语义：最后一次调用起算，15 分钟没有新请求 → Ollama 自动卸载该模型。
+- **卸载后不需要手动加载**：下一次翻译请求会带上 `keep_alive` 并触发 Ollama 自动冷加载（约 3~6 s），
+  只是那一页多等几秒，不会报错、也不用去 11437 页面点"加载"。
+- 想改时长：`set DMB_KEEP_ALIVE=5m`（或 `300` / `0` 立即卸 / `-1` 永不过期）。
 
 > 硬约束提醒：16 GB 显存装不下两个模型。翻译前 `ensure_inactive_unloaded()` 会卸载其余模型。
 
@@ -78,9 +94,9 @@ v2 默认 `keep_alive = -1`（**永不过期**），卸载**只由显式 `/model
 
 | P0 | v1 机制 | v2 做法 |
 |---|---|---|
-| **A** 日志静默丢条 6~21% | 全局 `_last_sakura_timing` 被缺 4 键的 `acc` **整体替换** → `KeyError` → 崩在写日志前 | **消灭全局变量**：计时写进 `ctx.stage`（每次请求独立对象）；纯函数 `ppl_geomean` / `stage_to_trace` 可单测 |
+| **A** 日志静默丢条 6~21% | 全局 `_last_sakura_timing` 被缺 4 键的 `acc` **整体替换** → `KeyError` → 崩在写日志前 | **消灭全局变量**：计时写进 `ctx.stage`（每次请求独立对象）；纯函数 `stage_to_trace` 可单测 |
 | **B** 2.5% 的"译文"其实是日文原文 | `call_sakura` 失败 `return ""` + `or x` | `Backend.translate_lines` **失败必抛 `BackendError`**；`_finalize` 断言非空；路由把错误以 502 显式返回 |
-| **C** 记录永不写入 | `_send(200,…)` 排在记账之前 | **先记账，后响应**：`app._handle_chat` 里 `write_image_record()` → `trace_event()` → `self._send()` |
+| **C** 记录永不写入 | `_send(200,…)` 排在记账之前 | **先落盘，后响应**：`app._handle_chat` 里 `eventlog.append_event(...)` → `self._send()` |
 
 ### 整页"配对"已删（2026-10-04 用户拍板）
 
@@ -90,18 +106,23 @@ FIFO 猜测会错配，所以 v2 只认显式 pageKey）。**实测：它在真�
 OCR 以前是浏览器本地跑的、根本不发 `/ocr`），
 真机 481 条记录全是 `none(no pageKey)`，`kind=page` 一条都没有。
 
-所以整套配对机制已删除，归档口径简化为：
+所以整套配对机制已删除。**2026-10-05（M4）又往前走了一步：归档本身也并进了统一事件流**，
+`image.jsonl` 与 `trace.jsonl` 两个文件不再产生：
 
-* **翻译侧照旧落一条** `image.jsonl`（`translate_list` + 各阶段耗时），**没有配对、没有 pageKey**；
-* **OCR 侧不再落归档**（没配对的纯噪音）；
+* 各阶段耗时 → 事件流 `llm.call` / `failure` 事件的 `what.stages`；
+* 原文/译文（原 `image.jsonl` 的内容）→ **L1** 的 `log.verbose` 事件，
+  环境变量 `DMB_EVENT_LOG_VERBOSE=1` 才写（**默认不写** —— "默认日志不含原文"是对用户的承诺）；
+* `.log` 保留，但**不再承担排障**，只当控制台镜像用；
 * `pageKey` 这个标识本身保留 —— 它是扩展的页身份与译图缓存键，与本服务无关。
+
+事件流的落盘位置与开关见 `eventlog.py` 的模块说明。
 
 ## 六、测试
 
 | 命令 | 覆盖 | 依赖 |
 |---|---|---|
-| `python scripts\test_pure.py` | 27 项纯函数单测：切段、输入抽取、Sakura 官方格式、**OCR 置信度口径**、**强制卸载语义** | 零依赖 |
-| `python scripts\test_server.py` | T1 健康 / T2 OCR / T3 简版翻译 + **翻译归档落盘** / T4 结构化 regions / T5 **失败必须显式** | 需服务端 + Ollama |
+| `python scripts\test_pure.py` | 30 项纯函数单测：切段、输入抽取、Sakura 官方格式、**OCR 置信度口径**、**强制卸载语义** | 零依赖 |
+| `python scripts\test_server.py` | 7 项检查：T1 健康 / T2 OCR / T3 简版翻译 / T3b requestId 回显 / T3c 事件流落盘 / T4 结构化 regions / T5 失败显式报错 | 需服务端 + Ollama |
 
 > 两个脚本都显式绕开系统代理 —— 环境里设了 `http_proxy` 而没设 `no_proxy` 时，
 > urllib 会把 `127.0.0.1` 也塞给代理，拿回一个莫名其妙的 502（踩过）。
