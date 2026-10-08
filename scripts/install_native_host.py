@@ -65,7 +65,6 @@ def resolve_python():
     for cand in (
         os.environ.get("DMB_PYTHON"),
         os.path.join(REPO, "server", ".venv", "Scripts", "python.exe"),
-        r"E:\AI\dmbTranslator\.conda\python.exe",
     ):
         if cand and os.path.exists(cand):
             return cand

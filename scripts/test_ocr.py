@@ -93,7 +93,7 @@ def main():
         import PIL  # noqa
     except Exception:
         print("[FAIL] 当前 Python 没有 PIL。请用带 PIL/torch 的环境跑，")
-        print("       例如: E:\\AI\\dmbTranslator\\.conda\\python.exe scripts\\test_ocr.py")
+        print("       例如: 先 set DMB_PYTHON=<带 PIL/torch 的 python.exe>，再跑本脚本")
         return 1
 
     font = pick_font()
