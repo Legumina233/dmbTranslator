@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>DMB 诊断</title>
+<style>
+  body { width: 380px; margin: 0; padding: 12px; font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; color: #e8e8ea; background: #1c1c1f; }
+  h3 { margin: 0 0 8px; font-size: 14px; }
+  button { width: 100%; padding: 10px; font-size: 14px; cursor: pointer; color: #101014; background: #7fd1a8; border: 0; border-radius: 6px; font-weight: 600; }
+  button:active { transform: translateY(1px); }
+  pre { margin: 10px 0 0; padding: 8px; max-height: 320px; overflow: auto; font-size: 11px; color: #c8c8cc; background: #141417; border-radius: 6px; white-space: pre-wrap; }
+  .note { margin-top: 8px; font-size: 11px; color: #9a9aa2; }
+</style>
+</head>
+<body>
+  <h3>一键保存诊断日志</h3>
+  <button id="save">保存并上传</button>
+  <pre id="out">读取中…</pre>
+  <div class="note">翻几页图之后再点这个按钮。日志会同时落到「下载」目录和本机服务的事件流里。</div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -10,7 +10,7 @@
   logs/unknown/YYYY-MM-DD.log           无模型归属（启动期 / 未指定 model 的调用）
 
 ★ M4 起 `.trace.jsonl` 与 `.image.jsonl` **已下线**，信息并入统一事件流
-  （`docs/日志体系重构设计-2026-10-05.md` §9）：
+  （`docs/CHANGELOG.md` §二）：
     * 分阶段耗时 → `llm.call` / `failure` 事件的 `what.stages`；
     * 原文/译文归档 → L1 详细层的 `log.verbose` 事件（默认不写）。
   本模块因此只剩"人类可读 `.log`"一件事，它的定位是**控制台镜像**：

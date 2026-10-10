@@ -21,6 +21,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+PIN_FILE = ROOT / ".upstream@a5af759"
 EXPECTED_COMMIT = "a5af759e3c1696045aeae1a7c43256d477182fd2"
 OLLAMA = "http://127.0.0.1:11434"
 DMB = "http://127.0.0.1:11436"
@@ -184,18 +185,20 @@ def check_disk():
 
 
 def check_repo():
-    sh = ROOT / "shinobu"
+    sh = ROOT / "frontend"
     if not (sh / "package.json").exists():
-        add("上游 shinobu/", FAIL, "未找到 —— 需 git clone")
+        add("上游 frontend/", FAIL, "未找到 —— 目录缺失")
     else:
-        add("上游 shinobu/", PASS, "存在")
-        rc, out, _ = run(["git", "-C", str(sh), "rev-parse", "HEAD"])
-        if rc == 0:
-            ok = out.strip() == EXPECTED_COMMIT
+        add("上游 frontend/", PASS, "存在")
+        # frontend/ 去掉了内嵌 .git，基线由 pin 文件记录（不再问 git）
+        if PIN_FILE.exists():
+            lines = PIN_FILE.read_text(encoding="utf-8").splitlines()
+            got = lines[1].strip() if len(lines) > 1 else ""
+            ok = got == EXPECTED_COMMIT
             add("上游 pin == a5af759", PASS if ok else WARN,
-                out.strip()[:12] + ("" if ok else f"（期望 {EXPECTED_COMMIT[:12]}）"))
+                got[:12] + ("" if ok else f"（期望 {EXPECTED_COMMIT[:12]}）"))
         else:
-            add("上游 pin == a5af759", WARN, "无法读取 git HEAD")
+            add("上游 pin == a5af759", WARN, "找不到 .upstream@a5af759")
 
     mo = ROOT / "manga-ocr" / "manga_ocr"
     add("vendor manga-ocr/", PASS if mo.exists() else FAIL,
@@ -220,7 +223,7 @@ def check_repo():
 
 
 def deep_sha():
-    mj = ROOT / "shinobu" / "public" / "models" / "models.json"
+    mj = ROOT / "frontend" / "public" / "models" / "models.json"
     if not mj.exists():
         return
     spec = json.loads(mj.read_text(encoding="utf-8"))

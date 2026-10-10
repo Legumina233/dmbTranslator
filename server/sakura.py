@@ -112,3 +112,36 @@ def chunk_lines(lines, max_chars=MAX_INPUT_CHARS):
 def batchable(lines):
     """能否整页批量：每行都必须是单行、非空。含内换行会破坏"行数对齐"，直接逐条。"""
     return len(lines) > 1 and all(ln and "\n" not in ln for ln in lines)
+
+
+# ── 行序号标记（失配补救档专用）────────────────────────────
+#
+# 为什么是 `序号|` 这个写法（2026-10-10 实测，同一批真实原文）：
+#   · 模型能 100% 原样保留行首序号，`|` 在译文里几乎不出现，解析无歧义；
+#   · 比 `[n] ` 省一半 token：每行 2.2 个 vs 5.5 个（`[` `]` 各占一个 token，纯浪费）；
+#   · 不用前端那个 36 字符 UUID —— 它会把输出撑长 6.5 倍，而且**自己会制造缺行**
+#     （14 行批次 3/3 必缺）。服务端 `items[i]` 与序号天然一一对应，映射回前端 id 零成本。
+TAG_RE = re.compile(r"^(\d+)\|(.*)$")
+
+
+def tag_lines(lines):
+    """给每行加 `序号|` 前缀（从 1 开始）。只在失配重跑时用。"""
+    return ["{}|{}".format(i + 1, ln) for i, ln in enumerate(lines)]
+
+
+def untag_lines(rows):
+    """把带序号的返回行拆成 (ids, texts, unparsed)。
+
+    刻意**不做任何修补**（不重排、不补空）—— 对齐判断交给调用方，
+    这里只负责如实拆解，免得把"模型漏了一行"粉饰成"对上了"。
+    空行直接跳过：它会让 ids 变短，由调用方的行数检查兜住。
+    """
+    ids, texts, unparsed = [], [], []
+    for r in rows:
+        m = TAG_RE.match(r)
+        if m:
+            ids.append(int(m.group(1)))
+            texts.append(m.group(2).strip())
+        elif r:
+            unparsed.append(r)
+    return ids, texts, unparsed

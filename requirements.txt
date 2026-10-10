@@ -1,0 +1,18 @@
+# dmbTranslator 本机服务依赖
+#
+# 安装：pip install -r requirements.txt
+# 想走 GPU（推荐，OCR 快 10 倍以上）先装 CUDA 版 torch，见 README「安装」一节。
+# 已装好 CUDA 版 torch 时直接跑上面这条即可：torch>=2.0 已被满足，pip 不会降级成 CPU 版。
+# 不要加 --no-deps —— 它会连 transformers 的 tokenizers / safetensors 等传递依赖一起跳过。
+#
+# Python 版本：3.11（3.10 / 3.12 未验证）
+
+# ── OCR（manga-ocr 必需）─────────────────────────
+torch>=2.0
+transformers>=4.40
+Pillow>=10.0
+jaconv>=0.3
+loguru>=0.7
+
+# ── 服务端 ───────────────────────────────────────
+# 全部使用标准库（http.server / urllib / json），无需额外依赖。

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<!--
+  README 头图的源文件。改动品牌名或副标题后，在仓库根目录执行：
+
+    "C:/Program Files/Google/Chrome/Application/chrome.exe" --headless=new --disable-gpu \
+      --hide-scrollbars --force-device-scale-factor=2 --virtual-time-budget=4000 \
+      --window-size=1200,260 \
+      --screenshot="assets/readme/dmbtranslator-readme-banner.png" \
+      "file:///<仓库绝对路径>/assets/readme/banner-source.html"
+
+  产出 2400x520（2 倍图），README 中按 1200x260 显示。
+  图标取自 public/icons/icon128.png，字标配色与 public/brand/dmb-wordmark.svg 一致
+  （dmb = #e0ce89，Translator = #33323d）。
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @font-face {
+    font-family: 'SHS';
+    src: url('../../public/fonts/SourceHanSansCN-VF.ttf.woff2') format('woff2');
+    font-weight: 100 900;
+    font-display: block;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 1200px; height: 260px; overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    background: linear-gradient(158deg, #ffffff 0%, #faf8f5 48%, #f2ede6 100%);
+    font-family: 'SHS', 'Microsoft YaHei', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .icon {
+    width: 136px; height: 136px;
+    flex: none;
+    margin-left: 60px;
+    border-radius: 50%;
+    object-fit: cover;
+    box-shadow: 0 12px 28px rgba(122, 94, 58, .24), 0 2px 6px rgba(122, 94, 58, .14);
+  }
+  .text { margin-left: 42px; padding-right: 56px; }
+  .word {
+    font-family: 'Arial Black', Arial, Helvetica, sans-serif;
+    font-weight: 900;
+    font-size: 80px;
+    line-height: 1;
+    letter-spacing: -1.5px;
+  }
+  .word .a { color: #e0ce89; }
+  .word .b { color: #33323d; }
+  .sub {
+    margin-top: 15px;
+    font-size: 25px;
+    font-weight: 500;
+    color: #4a4750;
+    letter-spacing: .6px;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+  <img class="icon" src="../../public/icons/icon128.png" alt="">
+  <div class="text">
+    <div class="word"><span class="a">dmb</span><span class="b">Translator</span></div>
+    <div class="sub">浏览器中的漫画翻译扩展，在 X / Pixiv 和 e-hentai 上一键翻译漫画图片</div>
+  </div>
+</body>
+</html>

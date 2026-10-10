@@ -5,7 +5,7 @@
 
 重构前两边各有 4 个出口、各写各的 schema（扩展：诊断流 / 整页日志 / DOM dataset /
 console；服务端：.log / .trace.jsonl / .image.jsonl / pages.jsonl），拿到日志也对不上号。
-重构后收敛成 **1 条事件流 + 1 个出口**（`docs/日志体系重构设计-2026-10-05.md`）：
+重构后收敛成 **1 条事件流 + 1 个出口**（`docs/CHANGELOG.md` §二）：
 扩展与服务端写**同一份 schema（v=2）**，靠 `requestId` 串成一条时间线。
 
 ## 落盘

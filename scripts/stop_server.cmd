@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal
 set PORT=%1
 if "%PORT%"=="" set PORT=11436

@@ -1,0 +1,594 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ExtensionPort } from '../../apps/extension/src/shared/extensionRuntime';
+import type { PipelineArtifacts } from '../../packages/image-pipeline/src/types';
+import type { PipelinePlatform } from '@dmb/image-pipeline';
+import type { ModelRuntime } from '@dmb/model-runtime';
+
+const mocks = vi.hoisted(() => ({
+  runPipeline: vi.fn(),
+  probeTextDetection: vi.fn(),
+  disposeAllModelSessions: vi.fn(async () => undefined),
+  blobToBase64: vi.fn(async () => 'cmVzdWx0'),
+}));
+
+vi.mock('../../packages/image-pipeline/src/pipeline/orchestrator', () => ({
+  runPipeline: mocks.runPipeline,
+  PipelineStageError: class PipelineStageError extends Error {},
+}));
+
+vi.mock('@dmb/image-pipeline', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@dmb/image-pipeline')>(),
+  probeTextDetection: mocks.probeTextDetection,
+}));
+
+vi.mock('../../packages/model-runtime/src/runtime/modelRegistry', () => ({
+  disposeAllModelSessions: mocks.disposeAllModelSessions,
+}));
+
+vi.mock('../../packages/diagnostics/src/diagnosticLogClient', () => ({
+  emitDiagnosticLog: vi.fn(),
+  emitDiagnosticLogAsync: vi.fn(async () => true),
+}));
+
+vi.mock('../../packages/image-pipeline/src/protocol/blobCodec', () => ({
+  base64ToBlob: (base64: string, contentType: string) => {
+    const binary = atob(base64);
+    return new Blob([Uint8Array.from(binary, (char) => char.charCodeAt(0))], { type: contentType });
+  },
+  blobToBase64: mocks.blobToBase64,
+  canvasToPngBlob: vi.fn(async () => new Blob(['result'], { type: 'image/png' })),
+}));
+
+import {
+  PipelineHost,
+  type PipelineHostDependencies,
+} from '../../apps/extension/src/offscreen/pipelineHost';
+import type { PipelineHostTransport } from '../../apps/extension/src/shared/pipelineHostTransport';
+import { LOCAL_PIPELINE_HOST_PORT } from '../../packages/image-pipeline/src/protocol/index';
+
+class FakePort implements ExtensionPort {
+  readonly name = LOCAL_PIPELINE_HOST_PORT;
+  readonly sent: unknown[] = [];
+  readonly messageListeners: Array<(message: unknown, port: ExtensionPort) => void> = [];
+  readonly disconnectListeners: Array<(port: ExtensionPort) => void> = [];
+  disconnected = false;
+
+  postMessage(message: unknown): void {
+    this.sent.push(message);
+  }
+
+  disconnect(): void {
+    if (this.disconnected) return;
+    this.disconnected = true;
+    for (const listener of this.disconnectListeners) listener(this);
+  }
+
+  onMessage = {
+    addListener: (listener: (message: unknown, port: ExtensionPort) => void): void => {
+      this.messageListeners.push(listener);
+    },
+    removeListener: (): void => undefined,
+  };
+
+  onDisconnect = {
+    addListener: (listener: (port: ExtensionPort) => void): void => {
+      this.disconnectListeners.push(listener);
+    },
+    removeListener: (): void => undefined,
+  };
+
+  emit(message: unknown): void {
+    for (const listener of this.messageListeners) listener(message, this);
+  }
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function artifacts(): PipelineArtifacts {
+  return {
+    original: { naturalWidth: 1, naturalHeight: 1 } as PipelineArtifacts['original'],
+    detectedRegions: [],
+    stageRegions: {
+      detected: [],
+      ocr: [],
+      merged: [],
+      ordered: [],
+    },
+    detectionCanvas: {} as PipelineArtifacts['detectionCanvas'],
+    ocrCanvas: {} as PipelineArtifacts['ocrCanvas'],
+    segmentationCanvas: null,
+    cleanedCanvas: {} as PipelineArtifacts['cleanedCanvas'],
+    resultCanvas: {} as PipelineArtifacts['resultCanvas'],
+    debugOriginalCanvas: null,
+    typesetDebugLog: null,
+    translationDebug: null,
+    ocrDebug: null,
+    ocrPostFilterDebug: null,
+    runtimeStages: [],
+    stageTimings: [],
+  };
+}
+
+function sendImageJob(
+  port: FakePort,
+  jobId: string,
+  detection?: {
+    width: number;
+    height: number;
+    packedMaskBase64: string;
+    regions: readonly unknown[];
+  },
+): void {
+  port.emit({ type: 'prepare', jobId });
+  port.emit({
+    type: 'start',
+    jobId,
+    file: { name: `${jobId}.png`, type: 'image/png', size: 1, lastModified: 1 },
+    config: {
+      sourceLang: 'ja',
+      targetLang: 'zh-CN',
+      translator: 'llm',
+      llmProvider: 'deepseek',
+      llmAuthMode: 'api_key',
+      llmBaseUrl: '',
+      llmModel: '',
+      typesetDebug: false,
+      // 「原文 / 去字」模式已移除：这里只需要跑通准入/取消机制，开去字调试跳过翻译。
+      eraseDebug: true,
+      collectDebugLog: false,
+      ocrEngine: 'paddleocr_v6_medium',
+      processMode: 'translate',
+    },
+    input: { chunkCount: 1, totalChars: 4 },
+    ...(detection ? { detection } : {}),
+  });
+  port.emit({ type: 'input-chunk', jobId, index: 0, data: 'AQ==' });
+  port.emit({ type: 'input-complete', jobId });
+}
+
+describe('PipelineHost single-task admission', () => {
+  let port: FakePort;
+  let originalChrome: unknown;
+  let hosts: PipelineHost[];
+
+  beforeEach(() => {
+    mocks.runPipeline.mockReset();
+    mocks.probeTextDetection.mockReset();
+    mocks.disposeAllModelSessions.mockClear();
+    mocks.blobToBase64.mockReset();
+    mocks.blobToBase64.mockResolvedValue('cmVzdWx0');
+    hosts = [];
+    port = new FakePort();
+    originalChrome = (globalThis as { chrome?: unknown }).chrome;
+    (globalThis as { chrome?: unknown }).chrome = {
+      runtime: {
+        connect: () => port,
+      },
+    };
+  });
+
+  afterEach(() => {
+    hosts.forEach((host) => host.dispose());
+    (globalThis as { chrome?: unknown }).chrome = originalChrome;
+    port.disconnect();
+  });
+
+  function createHost(
+    overrides: Partial<PipelineHostDependencies> = {},
+    transport?: PipelineHostTransport,
+  ): PipelineHost {
+    const modelRuntime: ModelRuntime = {
+      readModel: vi.fn(),
+      getSession: vi.fn(),
+      run: vi.fn(),
+      runImage: vi.fn(),
+      readTextResource: vi.fn(),
+      releaseSession: vi.fn(async () => undefined),
+      dispose: mocks.disposeAllModelSessions,
+    };
+    const platform = {} as PipelinePlatform;
+    const host = new PipelineHost(transport, {
+      modelRuntime,
+      platform,
+      hostInstanceId: 'pipeline-host-test',
+      ...overrides,
+    });
+    hosts.push(host);
+    return host;
+  }
+
+  it('扩展重载后 connect 抛 context invalidated → 静默退场（disposed、不再重连）', () => {
+    let connectCalls = 0;
+    const transport: PipelineHostTransport = {
+      reconnectOnDisconnect: true,
+      connect: vi.fn(() => {
+        connectCalls += 1;
+        throw new Error('Extension context invalidated.');
+      }),
+    };
+    const host = createHost({}, transport);
+
+    expect(() => host.connect()).not.toThrow();
+    expect(connectCalls).toBe(1);
+
+    // disposed 后再 connect 直接 return —— 不炸、不再调 transport.connect。
+    expect(() => host.connect()).not.toThrow();
+    expect(connectCalls).toBe(1);
+  });
+
+  it('connect 的其他错误照常抛出（不吞）', () => {
+    const transport: PipelineHostTransport = {
+      reconnectOnDisconnect: false,
+      connect: vi.fn(() => {
+        throw new Error('端口名冲突');
+      }),
+    };
+    const host = createHost({}, transport);
+    expect(() => host.connect()).toThrow('端口名冲突');
+  });
+
+  it('rejects unexpected overlap instead of maintaining a second queue', async () => {
+    const first = deferred<PipelineArtifacts>();
+    mocks.runPipeline.mockImplementationOnce(() => first.promise);
+    const host = createHost();
+    host.connect();
+
+    sendImageJob(port, 'job-1');
+    sendImageJob(port, 'job-2');
+
+    await vi.waitFor(() => expect(mocks.runPipeline).toHaveBeenCalledTimes(1));
+    expect(port.sent).toContainEqual(expect.objectContaining({
+      type: 'error',
+      jobId: 'job-2',
+      error: expect.objectContaining({ code: 'RUNTIME_BUSY' }),
+    }));
+
+    first.resolve(artifacts());
+
+    await vi.waitFor(() => {
+      expect(port.sent).toContainEqual({ type: 'complete', jobId: 'job-1' });
+    });
+    expect(mocks.runPipeline).toHaveBeenCalledTimes(1);
+    expect(port.sent).toContainEqual(expect.objectContaining({
+      type: 'result-meta',
+      jobId: 'job-1',
+      status: 'no-translatable-text',
+      record: expect.objectContaining({
+        schemaVersion: 2,
+        workingCopy: expect.objectContaining({
+          spec: { strategy: 'source-native' },
+          sourceToWorkingCopy: { kind: 'identity' },
+        }),
+      }),
+    }));
+  });
+
+  it('executes a detection-only job and returns the packed reusable artifact', async () => {
+    mocks.blobToBase64.mockResolvedValueOnce('AQ==');
+    mocks.probeTextDetection.mockResolvedValueOnce({
+      detection: {
+        width: 1,
+        height: 2,
+        packedMask: new Blob([Uint8Array.of(1)], { type: 'application/octet-stream' }),
+        regions: [{
+          id: 'region-1',
+          box: { x: 0, y: 0, width: 1, height: 2 },
+          direction: 'v',
+          prob: 0.9,
+          sourceText: '',
+          translatedText: '',
+        }],
+      },
+      detectorSignature: 'detector-v1',
+      topTouches: true,
+      bottomTouches: true,
+      topStrength: 16,
+      bottomStrength: 15,
+    });
+    const host = createHost();
+    host.connect();
+
+    port.emit({ type: 'prepare', jobId: 'probe-1' });
+    port.emit({
+      type: 'start-detection-probe',
+      jobId: 'probe-1',
+      file: { name: 'probe.png', type: 'image/png', size: 1, lastModified: 1 },
+      input: { chunkCount: 1, totalChars: 4 },
+    });
+    port.emit({ type: 'input-chunk', jobId: 'probe-1', index: 0, data: 'AQ==' });
+    port.emit({ type: 'input-complete', jobId: 'probe-1' });
+
+    await vi.waitFor(() => expect(port.sent).toContainEqual({
+      type: 'complete',
+      jobId: 'probe-1',
+    }));
+    expect(mocks.probeTextDetection).toHaveBeenCalledWith(
+      expect.any(File),
+      expect.objectContaining({
+        modelRuntime: expect.any(Object),
+        platform: expect.any(Object),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(port.sent).toContainEqual({
+      type: 'detection-result',
+      jobId: 'probe-1',
+      detection: {
+        width: 1,
+        height: 2,
+        packedMaskBase64: 'AQ==',
+        regions: expect.any(Array),
+      },
+      detectorSignature: 'detector-v1',
+      topTouches: true,
+      bottomTouches: true,
+      topStrength: 16,
+      bottomStrength: 15,
+    });
+    expect(mocks.runPipeline).not.toHaveBeenCalled();
+  });
+
+  it('injects a transmitted precomputed detection into a normal pipeline run', async () => {
+    mocks.runPipeline.mockResolvedValueOnce(artifacts());
+    const host = createHost();
+    host.connect();
+    sendImageJob(port, 'reuse-1', {
+      width: 1,
+      height: 2,
+      packedMaskBase64: 'AQ==',
+      regions: [{
+        id: 'region-1',
+        box: { x: 0, y: 0, width: 1, height: 2 },
+        direction: 'v',
+        prob: 0.9,
+        sourceText: '',
+        translatedText: '',
+      }],
+    });
+
+    await vi.waitFor(() => expect(mocks.runPipeline).toHaveBeenCalledOnce());
+    const options = mocks.runPipeline.mock.calls[0][3];
+    expect(options.precomputedDetection).toEqual(expect.objectContaining({
+      width: 1,
+      height: 2,
+      regions: expect.any(Array),
+      packedMask: expect.any(Blob),
+    }));
+    expect(new Uint8Array(await options.precomputedDetection.packedMask.arrayBuffer())).toEqual(
+      Uint8Array.of(1),
+    );
+  });
+
+  it('does not retain an unexpectedly overlapping task after rejecting it', async () => {
+    const first = deferred<PipelineArtifacts>();
+    mocks.runPipeline.mockImplementationOnce(() => first.promise);
+    const host = createHost();
+    host.connect();
+    sendImageJob(port, 'job-1');
+    sendImageJob(port, 'job-2');
+    await vi.waitFor(() => expect(mocks.runPipeline).toHaveBeenCalledTimes(1));
+
+    expect(port.sent).toContainEqual(expect.objectContaining({
+      type: 'error',
+      jobId: 'job-2',
+      error: expect.objectContaining({ code: 'RUNTIME_BUSY' }),
+    }));
+    first.resolve(artifacts());
+    await vi.waitFor(() => {
+      expect(port.sent).toContainEqual({ type: 'complete', jobId: 'job-1' });
+    });
+    expect(mocks.runPipeline).toHaveBeenCalledTimes(1);
+  });
+
+  it('cooperatively aborts the active task', async () => {
+    mocks.runPipeline.mockImplementation((_file, _config, _progress, options: { signal: AbortSignal }) => (
+      new Promise<PipelineArtifacts>((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+      })
+    ));
+    const host = createHost();
+    host.connect();
+    sendImageJob(port, 'active-cancel');
+    await vi.waitFor(() => expect(mocks.runPipeline).toHaveBeenCalledTimes(1));
+
+    port.emit({ type: 'cancel', jobId: 'active-cancel', reason: 'cancel active' });
+
+    await vi.waitFor(() => {
+      expect(port.sent).toContainEqual(expect.objectContaining({
+        type: 'error',
+        jobId: 'active-cancel',
+        error: expect.objectContaining({ code: 'TASK_CANCELLED' }),
+      }));
+    });
+  });
+
+  it('does not deliver a late result when cancellation arrives during result encoding', async () => {
+    const encoded = deferred<string>();
+    mocks.runPipeline.mockResolvedValueOnce(artifacts());
+    mocks.blobToBase64.mockImplementationOnce(() => encoded.promise);
+    const host = createHost();
+    host.connect();
+    sendImageJob(port, 'late-cancel');
+    await vi.waitFor(() => expect(mocks.blobToBase64).toHaveBeenCalledOnce());
+
+    port.emit({
+      type: 'cancel',
+      jobId: 'late-cancel',
+      reason: {
+        code: 'user-requested',
+        messageKey: 'pipeline.cancelled.userRequested',
+      },
+    });
+    encoded.resolve('cmVzdWx0');
+
+    await vi.waitFor(() => {
+      expect(port.sent).toContainEqual(expect.objectContaining({
+        type: 'error',
+        jobId: 'late-cancel',
+        error: expect.objectContaining({ code: 'TASK_CANCELLED' }),
+      }));
+    });
+    expect(port.sent).not.toContainEqual({
+      type: 'complete',
+      jobId: 'late-cancel',
+    });
+  });
+
+  it('releases sessions and asks the background to close after five idle minutes', async () => {
+    vi.useFakeTimers();
+    try {
+      const host = createHost();
+      host.connect();
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(mocks.disposeAllModelSessions).toHaveBeenCalledTimes(1);
+      expect(port.sent).toContainEqual({
+        type: 'idle-close',
+        hostInstanceId: 'pipeline-host-test',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses an injected idle timeout and emits structured host lifecycle events', async () => {
+    vi.useFakeTimers();
+    try {
+      const lifecycleEvents: Array<Record<string, unknown> | undefined> = [];
+      const diagnostics = {
+        emit: vi.fn((event: { data?: Record<string, unknown> }) => {
+          lifecycleEvents.push(event.data);
+        }),
+        emitAsync: vi.fn(async (event: { data?: Record<string, unknown> }) => {
+          lifecycleEvents.push(event.data);
+          return true;
+        }),
+      };
+      const host = createHost({ idleTimeoutMs: 1_000, diagnostics });
+      host.connect();
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(mocks.disposeAllModelSessions).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(mocks.disposeAllModelSessions).toHaveBeenCalledOnce();
+      expect(lifecycleEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          lifecycleEvent: 'host-created',
+          hostInstanceId: 'pipeline-host-test',
+        }),
+        expect.objectContaining({
+          lifecycleEvent: 'idle-dispose-complete',
+          hostInstanceId: 'pipeline-host-test',
+          idleTimeoutMs: 1_000,
+        }),
+        expect.objectContaining({
+          lifecycleEvent: 'idle-close-requested',
+          hostInstanceId: 'pipeline-host-test',
+        }),
+      ]));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let diagnostic persistence block an idle close request', async () => {
+    vi.useFakeTimers();
+    try {
+      const persisted = deferred<boolean>();
+      const diagnostics = {
+        emit: vi.fn(),
+        emitAsync: vi.fn(() => persisted.promise),
+      };
+      const host = createHost({ idleTimeoutMs: 1_000, diagnostics });
+      host.connect();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(port.sent).toContainEqual({
+        type: 'idle-close',
+        hostInstanceId: 'pipeline-host-test',
+      });
+      persisted.resolve(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases models but refuses to close the document while the image cache lives', async () => {
+    vi.useFakeTimers();
+    try {
+      let cached = true;
+      const host = createHost({ idleTimeoutMs: 1_000, keepAliveWhenIdle: () => cached });
+      host.connect();
+
+      // 第一轮空闲：模型/Worker 照常释放（那部分内存该还），但**不能**请求关闭文档 ——
+      // 文档一关，装在它堆里的译图缓存就整体没了。
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(mocks.disposeAllModelSessions).toHaveBeenCalledOnce();
+      expect(port.sent).not.toContainEqual(expect.objectContaining({ type: 'idle-close' }));
+
+      // 缓存被清空 → 下一个空闲周期放行。
+      cached = false;
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(port.sent).toContainEqual({
+        type: 'idle-close',
+        hostInstanceId: 'pipeline-host-test',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a new message cancels the pending keep-alive recheck', async () => {
+    vi.useFakeTimers();
+    try {
+      let cached = true;
+      const host = createHost({ idleTimeoutMs: 1_000, keepAliveWhenIdle: () => cached });
+      host.connect();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      // 空闲中被真实任务打断：这轮空闲结束，重检定时器随之作废。
+      port.emit({ type: 'prepare', jobId: 'wakes-up' });
+      await Promise.resolve();
+
+      cached = false;
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      // 任务已挂起（尚未开始传输），全程不该冒出关闭请求。
+      expect(port.sent).not.toContainEqual(expect.objectContaining({ type: 'idle-close' }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reconnects its host Port after the background service worker restarts', async () => {
+    vi.useFakeTimers();
+    try {
+      const host = createHost();
+      host.connect();
+      const firstPort = port;
+      port = new FakePort();
+
+      firstPort.disconnect();
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(port.sent).toContainEqual({
+        type: 'host-ready',
+        hostInstanceId: 'pipeline-host-test',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

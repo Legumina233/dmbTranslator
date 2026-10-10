@@ -23,7 +23,7 @@ DEFAULT_PORT = 11436
 
 # ★ Ollama 与模型控制**独立成一个服务**（2026-10-04 用户拍板）。
 # 目的：ollama 的启停 / 模型加载卸载 不再依赖 dmb_server（OCR + Sakura 规范化），
-# 三者可以自由开关、互不牵连。详见 docs/SERVER.md §七。
+# 三者可以自由开关、互不牵连。详见 docs/ARCHITECTURE.md §四（服务端）。
 DEFAULT_OLLAMA_SERVICE_PORT = 11437
 
 # ── 翻译 ────────────────────────────────────────────────

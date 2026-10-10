@@ -1,0 +1,22 @@
+{
+  "name": "@dmb/browser-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./trusted-types": {
+      "types": "./src/trustedTypesPolicy.ts",
+      "default": "./src/trustedTypesPolicy.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@dmb/translator-core": "0.1.0"
+  }
+}

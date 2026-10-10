@@ -3,9 +3,8 @@ node_modules/
 dist/
 dist-*/
 build/
-
-# ── 上游：自带 .git，作为 diff 基准；外层不追踪其内容 ──
-shinobu/
+.venv/
+venv/
 
 # ── 重资产：不入库，用软链或配置指向别处 ──────────
 public/models/
@@ -22,9 +21,6 @@ logs/
 __pycache__/
 *.pyc
 .pytest_cache/
-
-# ── 上游 pin 标记（保留，用于 diff 对账） ────────
-!shinobu/.upstream*
 
 # ── 编辑器 / 系统 ─────────────────────────────
 .idea/

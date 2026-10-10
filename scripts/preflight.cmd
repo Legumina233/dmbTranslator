@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal
 set HERE=%~dp0
 echo Running dmbTranslator v2 preflight...

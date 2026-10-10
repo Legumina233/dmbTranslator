@@ -1,0 +1,769 @@
+import {
+  getExtensionApi,
+  type ExtensionDnrRuleUpdate,
+  type ExtensionBrowserApi,
+  type ExtensionMessageSender,
+  type ExtensionWebRequestHeadersDetails,
+} from '../../shared/extensionRuntime';
+import { isReferrerPolicy } from '../../shared/referrerPolicy';
+import {
+  isUrlWithinRestrictedResourceBase,
+  parseRestrictedResourceBaseUrl,
+} from '../../shared/restrictedResourceUrl';
+import { arrayBufferToBase64, toErrorMessage } from '../../shared/utils';
+import { SerialTaskQueue } from '../serialTaskQueue';
+
+const legacyPximgRefererRuleId = 1;
+const imageRefererSessionRuleId = 2;
+const backgroundRequestTabId = -1;
+const defaultDownloadTimeoutMs = 30_000;
+const documentPolicyStorageKey = 'mangaTranslate.documentReferrerPolicies';
+const maxTrackedDocumentPolicies = 256;
+
+export type ImageDownloadRequest = {
+  imageUrl: string;
+  referrerPolicy?: ReferrerPolicy;
+  allowedBaseUrl?: string;
+  /**
+   * 页身份（`${gid}-${page}`）。**只用于旁路日志** —— 下载失败发生在 pipeline 之外，
+   * 没有它就只能靠时间戳猜"是哪一页失败了"（94 页那类问题正是这么失踪的）。
+   * 由内容脚本随消息带来，缺失时事件流里这一项为空，不影响下载本身。
+   */
+  pageKey?: string;
+  /** 诊断 runId，同上：旁路日志用。 */
+  runId?: string;
+};
+
+/** 一次下载失败的旁路报告（**结构化**，比那句拼好的错误字符串信息量大）。 */
+export type ImageDownloadFailureReport = {
+  pageKey?: string;
+  runId?: string;
+  /** 去掉查询串的图片地址（签名参数 `keystamp=` 之类不外发）。 */
+  imageUrl: string;
+  hostname: string;
+  reason: string;
+  /** 实际进了循环的候选失败条数（参数校验阶段就抛错时为 0）。 */
+  attemptCount: number;
+  attempts: Array<{
+    index: number;
+    hostname: string;
+    reason: string;
+    durationMs: number;
+    refererApplied: boolean;
+    dnrError?: string;
+  }>;
+  durationMs: number;
+};
+
+export type DownloadedImage = {
+  base64: string;
+  contentType: string;
+  sourceUrl: string;
+};
+
+export type ImageDownloader = {
+  download(
+    request: ImageDownloadRequest,
+    sender: ExtensionMessageSender,
+    contentSessionId?: string,
+  ): Promise<DownloadedImage>;
+  cancelPendingForSession(contentSessionId: string): number;
+};
+
+type ImageDownloaderDependencies = {
+  chromeApi?: ExtensionBrowserApi | null;
+  fetchImage?: typeof fetch;
+  timeoutMs?: number;
+  /**
+   * 下载失败的旁路出口（M2 · 统一事件流）。
+   *
+   * **必须依赖注入**：本模块不该知道日志怎么发、发到哪。调用方（background 入口）
+   * 传一个 emit 进来，测试里传一个收集器即可断言"失败必有一条"。
+   * 未注入时整套不存在 —— 关闭时连那层调用都不产生。
+   */
+  onFailure?: (report: ImageDownloadFailureReport) => void;
+};
+
+/**
+ * 只保留 origin + pathname。
+ *
+ * 图片地址常带逐请求签名（`keystamp=` 等），**整条 URL 不能进日志** ——
+ * 开源出去的日志会被别人贴给我们看，签名属于不该外发的东西。
+ * 排查"哪个 host 挂了"只需要 host（+ 路径有助于分辨变体）。
+ */
+function sanitizeImageUrl(raw: string): { url: string; hostname: string } {
+  try {
+    const parsed = new URL(raw);
+    return {
+      url: `${parsed.origin}${parsed.pathname}`,
+      hostname: parsed.hostname,
+    };
+  } catch {
+    return { url: '', hostname: '' };
+  }
+}
+
+type ImageAttemptFailure = {
+  candidateIndex: number;
+  candidateCount: number;
+  hostname: string;
+  reason: string;
+  durationMs: number;
+  refererApplied: boolean;
+  dnrError?: string;
+};
+
+type TrackedDocumentPolicy = {
+  documentUrlHash: string;
+  policy: ReferrerPolicy;
+  updatedAt: number;
+};
+
+type DocumentPolicyTracker = {
+  get(sender: ExtensionMessageSender): Promise<ReferrerPolicy | undefined>;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getDocumentPolicyKeys(details: {
+  documentId?: string;
+  tabId?: number;
+  frameId?: number;
+}): string[] {
+  const keys: string[] = [];
+  if (details.documentId) keys.push(`document:${details.documentId}`);
+  if (typeof details.tabId === 'number' && details.tabId >= 0 && typeof details.frameId === 'number') {
+    keys.push(`frame:${details.tabId}:${details.frameId}`);
+  }
+  return keys;
+}
+
+function extractReferrerPolicyFromHeaders(
+  headers: ExtensionWebRequestHeadersDetails['responseHeaders'],
+): ReferrerPolicy | undefined {
+  let policy: ReferrerPolicy | undefined;
+  for (const header of headers ?? []) {
+    if (header.name.toLowerCase() !== 'referrer-policy' || !header.value) continue;
+    for (const token of header.value.split(',')) {
+      const candidate = token.trim().toLowerCase();
+      if (candidate && isReferrerPolicy(candidate)) policy = candidate;
+    }
+  }
+  return policy;
+}
+
+function normalizeDocumentUrlForPolicyMatch(value: string): string | undefined {
+  try {
+    const url = parseHttpUrl(value, '页面地址');
+    url.username = '';
+    url.password = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+async function hashDocumentUrl(value: string): Promise<string | undefined> {
+  const normalized = normalizeDocumentUrlForPolicyMatch(value);
+  const subtle = globalThis.crypto?.subtle;
+  if (!normalized || !subtle) return undefined;
+  try {
+    const digest = await subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(normalized),
+    );
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+  } catch {
+    return undefined;
+  }
+}
+
+function createDocumentPolicyTracker(chromeApi: ExtensionBrowserApi | null | undefined): DocumentPolicyTracker {
+  const policies = new Map<string, TrackedDocumentPolicy>();
+  const locallyUpdatedKeys = new Set<string>();
+  const pendingUpdates = new Map<string, Promise<void>>();
+  const keyRevisions = new Map<string, number>();
+  const sessionStorage = chromeApi?.storage?.session;
+  let nextRevision = 0;
+  let storageLoaded = false;
+  let persistRequested = false;
+  let persistTail: Promise<void> = Promise.resolve();
+
+  const trimPolicies = (): void => {
+    while (policies.size > maxTrackedDocumentPolicies) {
+      const oldestKey = policies.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      policies.delete(oldestKey);
+    }
+  };
+
+  const queuePersist = (): void => {
+    if (!sessionStorage?.set) return;
+    if (!storageLoaded) {
+      persistRequested = true;
+      return;
+    }
+    persistTail = persistTail
+      .catch(() => undefined)
+      .then(async () => {
+        await sessionStorage.set?.({
+          [documentPolicyStorageKey]: Object.fromEntries(policies),
+        });
+      })
+      .catch(() => undefined);
+  };
+
+  const ready = (async () => {
+    if (!sessionStorage?.get) return;
+    try {
+      const stored = await sessionStorage.get(documentPolicyStorageKey);
+      const snapshot = stored[documentPolicyStorageKey];
+      if (!isRecord(snapshot)) return;
+      const entries: Array<[string, TrackedDocumentPolicy]> = [];
+      for (const [key, value] of Object.entries(snapshot)) {
+        if (
+          locallyUpdatedKeys.has(key)
+          || !isRecord(value)
+          || !isReferrerPolicy(value.policy)
+          || !value.policy
+          || typeof value.documentUrlHash !== 'string'
+          || !/^[\da-f]{64}$/u.test(value.documentUrlHash)
+          || typeof value.updatedAt !== 'number'
+        ) continue;
+        entries.push([key, {
+          documentUrlHash: value.documentUrlHash,
+          policy: value.policy,
+          updatedAt: value.updatedAt,
+        }]);
+      }
+      entries.sort((left, right) => left[1].updatedAt - right[1].updatedAt);
+      for (const [key, value] of entries) policies.set(key, value);
+      trimPolicies();
+    } catch {
+      // Session persistence is an optimization; live observations still work.
+    } finally {
+      storageLoaded = true;
+      locallyUpdatedKeys.clear();
+      if (persistRequested) {
+        persistRequested = false;
+        queuePersist();
+      }
+    }
+  })();
+  if (!sessionStorage?.get) storageLoaded = true;
+
+  const listener = (details: ExtensionWebRequestHeadersDetails): void => {
+    const keys = getDocumentPolicyKeys(details);
+    if (keys.length === 0) return;
+    const policy = extractReferrerPolicyFromHeaders(details.responseHeaders);
+    const revision = nextRevision + 1;
+    nextRevision = revision;
+    for (const key of keys) {
+      if (!storageLoaded) locallyUpdatedKeys.add(key);
+      keyRevisions.set(key, revision);
+      policies.delete(key);
+    }
+    trimPolicies();
+    if (!policy) {
+      for (const key of keys) {
+        if (keyRevisions.get(key) === revision) keyRevisions.delete(key);
+      }
+      queuePersist();
+      return;
+    }
+
+    const update = (async () => {
+      const documentUrlHash = await hashDocumentUrl(details.url);
+      const updatedAt = Date.now();
+      for (const key of keys) {
+        if (keyRevisions.get(key) !== revision) continue;
+        policies.delete(key);
+        if (documentUrlHash) {
+          policies.set(key, {
+            documentUrlHash,
+            policy,
+            updatedAt,
+          });
+        }
+        keyRevisions.delete(key);
+      }
+      trimPolicies();
+      queuePersist();
+    })();
+    for (const key of keys) pendingUpdates.set(key, update);
+    void update.finally(() => {
+      for (const key of keys) {
+        if (pendingUpdates.get(key) === update) pendingUpdates.delete(key);
+      }
+    });
+  };
+
+  const headersReceived = chromeApi?.webRequest?.onHeadersReceived;
+  if (headersReceived) {
+    try {
+      headersReceived.addListener(
+        listener,
+        {
+          urls: ['<all_urls>'],
+          types: ['main_frame', 'sub_frame'],
+        },
+        ['responseHeaders', 'extraHeaders'],
+      );
+    } catch {
+      try {
+        headersReceived.addListener(
+          listener,
+          {
+            urls: ['<all_urls>'],
+            types: ['main_frame', 'sub_frame'],
+          },
+          ['responseHeaders'],
+        );
+      } catch {
+        // Element/meta policy and the browser default remain available.
+      }
+    }
+  }
+
+  return {
+    async get(sender) {
+      await ready;
+      const keys = getDocumentPolicyKeys({
+        documentId: sender.documentId,
+        tabId: sender.tab?.id,
+        frameId: sender.frameId,
+      });
+      await Promise.all(keys.map((key) => pendingUpdates.get(key)));
+      const trustedDocumentUrl = getTrustedDocumentUrl(sender);
+      if (!trustedDocumentUrl) return undefined;
+      const documentUrlHash = await hashDocumentUrl(trustedDocumentUrl.toString());
+      if (!documentUrlHash) return undefined;
+      for (const key of keys) {
+        const tracked = policies.get(key);
+        if (tracked?.documentUrlHash === documentUrlHash) return tracked.policy;
+      }
+      return undefined;
+    },
+  };
+}
+
+function buildOriginalCandidates(imageUrl: string): string[] {
+  const urls: string[] = [];
+  const parsed = new URL(imageUrl);
+  if (
+    parsed.hostname === 'pbs.twimg.com'
+    && (parsed.searchParams.has('name') || parsed.searchParams.has('format'))
+  ) {
+    const withOrig = new URL(parsed.toString());
+    withOrig.searchParams.set('name', 'orig');
+    urls.push(withOrig.toString());
+  }
+  urls.push(imageUrl);
+  return Array.from(new Set(urls));
+}
+
+function parseHttpUrl(value: string, label: string): URL {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${label}不是有效 URL`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${label}仅支持 HTTP/HTTPS`);
+  }
+  return parsed;
+}
+
+function parseAllowedBaseUrl(value: string): URL {
+  const parsed = parseRestrictedResourceBaseUrl(value);
+  if (!parsed) {
+    throw new Error('允许的图片范围必须是无凭据、无查询参数的 HTTPS URL');
+  }
+  return parsed;
+}
+
+function isWithinAllowedBase(target: URL, base: URL): boolean {
+  return isUrlWithinRestrictedResourceBase(target, base);
+}
+
+function getTrustedDocumentUrl(sender: ExtensionMessageSender): URL | undefined {
+  for (const candidate of [sender.documentUrl, sender.tab?.url]) {
+    if (!candidate) continue;
+    try {
+      return parseHttpUrl(candidate, '页面地址');
+    } catch {
+      // Try the next browser-provided sender URL.
+    }
+  }
+  return undefined;
+}
+
+function toSanitizedFullReferrer(source: URL): string {
+  const sanitized = new URL(source.toString());
+  sanitized.username = '';
+  sanitized.password = '';
+  sanitized.hash = '';
+  return sanitized.toString();
+}
+
+function toOriginReferrer(source: URL): string {
+  return `${source.origin}/`;
+}
+
+function computeReferrer(
+  source: URL | undefined,
+  target: URL,
+  policy: ReferrerPolicy | undefined,
+): string | undefined {
+  if (!source) return undefined;
+
+  const effectivePolicy = policy || 'strict-origin-when-cross-origin';
+  const sameOrigin = source.origin === target.origin;
+  const isDowngrade = source.protocol === 'https:' && target.protocol === 'http:';
+  const origin = toOriginReferrer(source);
+  const serializedFull = toSanitizedFullReferrer(source);
+  const full = serializedFull.length > 4_096 ? origin : serializedFull;
+
+  switch (effectivePolicy) {
+    case 'no-referrer':
+      return undefined;
+    case 'no-referrer-when-downgrade':
+      return isDowngrade ? undefined : full;
+    case 'origin':
+      return origin;
+    case 'origin-when-cross-origin':
+      return sameOrigin ? full : origin;
+    case 'same-origin':
+      return sameOrigin ? full : undefined;
+    case 'strict-origin':
+      return isDowngrade ? undefined : origin;
+    case 'strict-origin-when-cross-origin':
+      if (sameOrigin) return full;
+      return isDowngrade ? undefined : origin;
+    case 'unsafe-url':
+      return full;
+    default:
+      return undefined;
+  }
+}
+
+function startsWithBytes(bytes: Uint8Array, signature: number[]): boolean {
+  return signature.every((value, index) => bytes[index] === value);
+}
+
+function readAscii(bytes: Uint8Array, start: number, length: number): string {
+  return String.fromCharCode(...bytes.slice(start, start + length));
+}
+
+function detectImageContentType(buffer: ArrayBuffer, declaredContentType: string): string | undefined {
+  const bytes = new Uint8Array(buffer);
+  if (startsWithBytes(bytes, [0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (startsWithBytes(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
+  if (readAscii(bytes, 0, 6) === 'GIF87a' || readAscii(bytes, 0, 6) === 'GIF89a') return 'image/gif';
+  if (readAscii(bytes, 0, 4) === 'RIFF' && readAscii(bytes, 8, 4) === 'WEBP') return 'image/webp';
+  if (readAscii(bytes, 0, 2) === 'BM') return 'image/bmp';
+  if (
+    startsWithBytes(bytes, [0x49, 0x49, 0x2a, 0x00])
+    || startsWithBytes(bytes, [0x4d, 0x4d, 0x00, 0x2a])
+  ) return 'image/tiff';
+  if (startsWithBytes(bytes, [0x00, 0x00, 0x01, 0x00])) return 'image/x-icon';
+
+  if (readAscii(bytes, 4, 4) === 'ftyp') {
+    const brands = readAscii(bytes, 8, Math.min(24, Math.max(0, bytes.length - 8)));
+    if (/(?:avif|avis)/u.test(brands)) return 'image/avif';
+    if (/(?:heic|heix|hevc|hevx|mif1|msf1)/u.test(brands)) return 'image/heif';
+  }
+
+  const normalizedDeclaredType = declaredContentType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  if (normalizedDeclaredType === 'image/svg+xml') {
+    const prefix = new TextDecoder().decode(bytes.slice(0, Math.min(bytes.length, 1024)))
+      .replace(/^\uFEFF/u, '')
+      .trimStart();
+    if (/^(?:<\?xml[\s\S]*?)?<svg(?:\s|>)/iu.test(prefix)) return 'image/svg+xml';
+  }
+
+  return undefined;
+}
+
+function toSanitizedErrorMessage(error: unknown): string {
+  const message = toErrorMessage(error)
+    .replace(/\bhttps?:\/\/[^\s"'<>)}\]]+/giu, '[URL_REDACTED]')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return message || '未知错误';
+}
+
+function toDnrError(error: unknown): string {
+  const message = toSanitizedErrorMessage(error);
+  return message || '未知 DNR 错误';
+}
+
+async function removeRule(
+  updateRules: ((options: ExtensionDnrRuleUpdate) => Promise<void>) | undefined,
+  ruleId: number,
+): Promise<string | undefined> {
+  if (!updateRules) return undefined;
+  try {
+    await updateRules({
+      removeRuleIds: [ruleId],
+      addRules: [],
+    });
+    return undefined;
+  } catch (error) {
+    return toDnrError(error);
+  }
+}
+
+function formatAttemptFailure(failure: ImageAttemptFailure): string {
+  const details = [
+    `候选 ${failure.candidateIndex}/${failure.candidateCount}`,
+    `host=${failure.hostname}`,
+    `referer=${failure.refererApplied ? 'page-context' : 'none'}`,
+    failure.reason,
+    `duration=${failure.durationMs}ms`,
+  ];
+  if (failure.dnrError) details.push(`DNR=${failure.dnrError}`);
+  return details.join(', ');
+}
+
+export function createImageDownloader(
+  dependencies: ImageDownloaderDependencies = {},
+): ImageDownloader {
+  const chromeApi = dependencies.chromeApi === undefined
+    ? getExtensionApi()
+    : dependencies.chromeApi;
+  const dnr = chromeApi?.declarativeNetRequest;
+  const extensionId = chromeApi?.runtime?.id;
+  const documentPolicyTracker = createDocumentPolicyTracker(chromeApi);
+  const fetchImage = dependencies.fetchImage ?? globalThis.fetch.bind(globalThis);
+  const timeoutMs = dependencies.timeoutMs ?? defaultDownloadTimeoutMs;
+  const onFailure = dependencies.onFailure;
+  const queue = new SerialTaskQueue<DownloadedImage>();
+
+  const initialization = Promise.all([
+    removeRule(dnr?.updateDynamicRules, legacyPximgRefererRuleId),
+    removeRule(dnr?.updateSessionRules, imageRefererSessionRuleId),
+  ]);
+
+  /**
+   * M2 · 失败第一公民：**整个下载过程包一层，任何一条抛出路径都会上报**。
+   *
+   * 不是在每个 `throw` 前逐个加一句 —— 那样以后新增抛出点必然漏记（94 页那类错误
+   * 当初就是这么隐身的：它抛在 pipeline 之外，谁也没想到要去记它）。
+   * 包一层后，"抛出"与"上报"是同一件事的两半，新增抛出点自动被覆盖。
+   */
+  async function downloadSerialized(
+    request: ImageDownloadRequest,
+    sender: ExtensionMessageSender,
+  ): Promise<DownloadedImage> {
+    const startedAt = Date.now();
+    const failures: ImageAttemptFailure[] = [];
+    try {
+      return await downloadCandidates(request, sender, failures);
+    } catch (error) {
+      if (onFailure) {
+        const { url, hostname } = sanitizeImageUrl(request.imageUrl);
+        onFailure({
+          pageKey: request.pageKey,
+          runId: request.runId,
+          imageUrl: url,
+          hostname,
+          reason: toErrorMessage(error),
+          attemptCount: failures.length,
+          attempts: failures.map((failure) => ({
+            index: failure.candidateIndex,
+            hostname: failure.hostname,
+            reason: failure.reason,
+            durationMs: failure.durationMs,
+            refererApplied: failure.refererApplied,
+            ...(failure.dnrError ? { dnrError: failure.dnrError } : {}),
+          })),
+          durationMs: Math.max(0, Date.now() - startedAt),
+        });
+      }
+      throw error;
+    }
+  }
+
+  async function downloadCandidates(
+    request: ImageDownloadRequest,
+    sender: ExtensionMessageSender,
+    failures: ImageAttemptFailure[],
+  ): Promise<DownloadedImage> {
+    const requestedImageUrl = parseHttpUrl(request.imageUrl, '图片地址');
+    const allowedBase = request.allowedBaseUrl
+      ? parseAllowedBaseUrl(request.allowedBaseUrl)
+      : undefined;
+    if (allowedBase && !isWithinAllowedBase(requestedImageUrl, allowedBase)) {
+      throw new Error('图片地址超出允许范围');
+    }
+    const trustedDocumentUrl = getTrustedDocumentUrl(sender);
+    const candidates = buildOriginalCandidates(request.imageUrl);
+    const initializationResults = await initialization;
+    const startupDnrErrors = initializationResults.filter((error): error is string => Boolean(error));
+    const effectiveReferrerPolicy = request.referrerPolicy
+      || await documentPolicyTracker.get(sender);
+
+
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
+      const targetUrl = parseHttpUrl(candidate, '图片地址');
+      if (allowedBase && !isWithinAllowedBase(targetUrl, allowedBase)) {
+        throw new Error('图片候选地址超出允许范围');
+      }
+      const referer = computeReferrer(trustedDocumentUrl, targetUrl, effectiveReferrerPolicy);
+      const startedAt = Date.now();
+      let dnrError = startupDnrErrors.join('; ') || undefined;
+      let ruleInstalled = false;
+      let attemptFailure: ImageAttemptFailure | undefined;
+      const canAttemptReferer = Boolean(
+        referer
+        && extensionId
+        && dnr?.updateSessionRules,
+      );
+      if (referer && !canAttemptReferer) {
+        const unavailableReason = extensionId
+          ? 'DNR session rules unavailable'
+          : 'extension id unavailable';
+        dnrError = [dnrError, unavailableReason].filter(Boolean).join('; ');
+      }
+
+      if (canAttemptReferer) {
+        try {
+          await dnr?.updateSessionRules?.({
+            removeRuleIds: [imageRefererSessionRuleId],
+            addRules: [{
+              id: imageRefererSessionRuleId,
+              priority: 1,
+              action: {
+                type: 'modifyHeaders',
+                requestHeaders: [{
+                  header: 'Referer',
+                  operation: 'set',
+                  value: referer,
+                }],
+              },
+              condition: {
+                initiatorDomains: [extensionId],
+                requestDomains: [targetUrl.hostname],
+                tabIds: [backgroundRequestTabId],
+                requestMethods: ['get'],
+                resourceTypes: ['xmlhttprequest'],
+              },
+            }],
+          });
+          ruleInstalled = true;
+        } catch (error) {
+          dnrError = [dnrError, toDnrError(error)].filter(Boolean).join('; ');
+        }
+      }
+
+      const abortController = new AbortController();
+      let timedOut = false;
+      let downloadedImage: DownloadedImage | undefined;
+      const timeoutHandle = globalThis.setTimeout(() => {
+        timedOut = true;
+        abortController.abort();
+      }, timeoutMs);
+
+      try {
+        const response = await fetchImage(candidate, {
+          method: 'GET',
+          credentials: 'include',
+          cache: 'default',
+          redirect: allowedBase ? 'error' : 'follow',
+          signal: abortController.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const sourceUrl = parseHttpUrl(response.url || candidate, '图片响应地址');
+        if (allowedBase && !isWithinAllowedBase(sourceUrl, allowedBase)) {
+          throw new Error('图片响应地址超出允许范围');
+        }
+
+        const buffer = await response.arrayBuffer();
+        if (buffer.byteLength === 0) {
+          throw new Error('返回空文件');
+        }
+        const declaredContentType = response.headers.get('content-type') ?? '';
+        const contentType = detectImageContentType(buffer, declaredContentType);
+        if (!contentType) {
+          const normalizedType = declaredContentType.split(';', 1)[0]?.trim().toLowerCase();
+          throw new Error(
+            normalizedType === 'text/html'
+              ? '服务器返回了 HTML，未返回原始图片'
+              : `响应不是支持的图片格式${normalizedType ? `（${normalizedType}）` : ''}`,
+          );
+        }
+
+        downloadedImage = {
+          base64: arrayBufferToBase64(buffer),
+          contentType,
+          sourceUrl: sourceUrl.href,
+        };
+      } catch (error) {
+        attemptFailure = {
+          candidateIndex: index + 1,
+          candidateCount: candidates.length,
+          hostname: targetUrl.hostname,
+          reason: timedOut ? `请求超时（${timeoutMs}ms）` : toSanitizedErrorMessage(error),
+          durationMs: Math.max(0, Date.now() - startedAt),
+          refererApplied: ruleInstalled,
+          dnrError,
+        };
+        failures.push(attemptFailure);
+      } finally {
+        globalThis.clearTimeout(timeoutHandle);
+        if (canAttemptReferer) {
+          const cleanupError = await removeRule(
+            dnr?.updateSessionRules,
+            imageRefererSessionRuleId,
+          );
+          if (cleanupError && attemptFailure) {
+            attemptFailure.dnrError = [
+              attemptFailure.dnrError,
+              `cleanup: ${cleanupError}`,
+            ].filter(Boolean).join('; ');
+          } else if (cleanupError) {
+            downloadedImage = undefined;
+            failures.push({
+              candidateIndex: index + 1,
+              candidateCount: candidates.length,
+              hostname: targetUrl.hostname,
+              reason: '临时 Referer 规则清理失败',
+              durationMs: Math.max(0, Date.now() - startedAt),
+              refererApplied: ruleInstalled,
+              dnrError: `cleanup: ${cleanupError}`,
+            });
+          }
+        }
+      }
+      if (downloadedImage) {
+        return downloadedImage;
+      }
+    }
+
+    throw new Error(
+      `无法取得原始图片字节: ${failures.map(formatAttemptFailure).join(' | ') || '未知错误'}`,
+    );
+  }
+
+  return {
+    download(request, sender, contentSessionId) {
+      return queue.enqueue(
+        () => downloadSerialized(request, sender),
+        contentSessionId,
+      );
+    },
+    cancelPendingForSession(contentSessionId) {
+      return queue.cancelPendingForSession(contentSessionId);
+    },
+  };
+}

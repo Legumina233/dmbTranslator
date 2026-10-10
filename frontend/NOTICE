@@ -1,0 +1,72 @@
+dmbTranslator
+Copyright (C) 2026 dmbTranslator contributors
+
+This product includes software developed as a fork of ShinobuTranslator.
+
+--------------------------------------------------------------------------
+1. 上游：ShinobuTranslator
+--------------------------------------------------------------------------
+
+  ShinobuTranslator
+  https://github.com/DonutShinobu/ShinobuTranslator
+  Copyright (C) ShinobuTranslator contributors
+
+  分叉基线：commit a5af759（上游 v0.8.3）
+  许可证：GNU General Public License v3.0（GPL-3.0）
+
+  本项目沿用上游同一许可证，完整条款见仓库根目录 LICENSE。
+  本项目的改动范围记录在 README「与上游的关系」一节，以及本机服务端部分的
+  docs/UPSTREAM_PATCHES.md。
+
+--------------------------------------------------------------------------
+2. 第三方代码
+--------------------------------------------------------------------------
+
+  manga-ocr —— https://github.com/kha-white/manga-ocr
+  Copyright (c) 2021 kha-white
+  许可证：MIT
+  位置：本机服务端 vendor 目录（manga-ocr/），随行 LICENSE 与改动记录见
+  该目录下的 LICENSE 与 PATCHES.md。
+
+  PaddleOCR（PP-OCRv6 识别模型与字典）
+  https://github.com/PaddlePaddle/PaddleOCR
+  许可证：Apache-2.0
+  说明：模型文件不随仓库分发，由 scripts/download-models.mjs 单独获取。
+
+  应用图标（Donut icon）
+  https://www.flaticon.com/free-icon/donut_6402298
+  作者：smashingstocks，Flaticon Free License
+  署名：Designed by smashingstocks from Flaticon
+
+  应用字标（Sour Gummy outline）
+  https://github.com/eifetx/Sour-Gummy-Fonts
+  Copyright 2018 The Sour Gummy Project Authors
+  许可证：SIL Open Font License 1.1
+  说明：仅将字标文字转换为 SVG outline 使用，不分发完整字体文件。
+
+--------------------------------------------------------------------------
+3. 模型资产与许可证状态
+--------------------------------------------------------------------------
+
+  模型文件（约 206 MB）不在本仓库内，也不由本仓库分发，需执行
+  `npm run models:download` 单独获取。
+
+  每个资产的许可状态记录在
+  packages/model-manifest/publication-policy.json：
+
+    - approved     —— 允许分发，需保留归属与许可证文本
+    - conditional  —— 需附带条件（如 GPL 源码获取途径）后方可分发
+    - blocked      —— 许可证冲突或来源记录不全，不得分发
+
+  当前存在 blocked 资产。`scripts/download-models.mjs` 下载时会打印警告
+  （加 `--strict-license` 可改为阻断）；`scripts/upload-r2-models.mjs` 在写入前
+  强制校验策略文件，blocked 资产不得上传分发。
+
+  各资产的精确来源、SHA-256 与许可依据见 THIRD_PARTY_NOTICES.md。
+
+--------------------------------------------------------------------------
+4. npm 依赖
+--------------------------------------------------------------------------
+
+  生产依赖的精确版本与 SPDX 许可证快照见 THIRD_PARTY_DEPENDENCIES.json。
+  该文件不替代各包自身应随分发物保留的 LICENSE / NOTICE。

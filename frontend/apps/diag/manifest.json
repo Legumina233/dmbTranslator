@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "DMB 翻译计时诊断",
+  "version": "1.0.0",
+  "description": "只读诊断小扩展：记录页面侧里程碑 / 页面生命周期 / 本地服务基线耗时，一键导出日志。不修改、不依赖主扩展。",
+  "permissions": ["storage", "alarms", "downloads", "activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1:11436/*"],
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.exhentai.org/*",
+        "*://*.e-hentai.org/*",
+        "*://*.ehgt.org/*",
+        "*://*.pixiv.net/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": { "service_worker": "sw.js" },
+  "action": {
+    "default_title": "一键保存诊断日志",
+    "default_popup": "popup.html"
+  }
+}

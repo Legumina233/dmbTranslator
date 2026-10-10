@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "翻页重载观测器",
+  "version": "1.0.0",
+  "description": "记录 exhentai / e-hentai 阅读页的文档重载、切页与可见性变化，一键导出现场日志（只读观测，不影响页面）。",
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.e-hentai.org/*", "*://*.exhentai.org/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "翻页重载观测器"
+  }
+}

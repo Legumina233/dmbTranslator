@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        width: 460px;
+        margin: 0;
+        padding: 12px 14px 16px;
+        font: 12px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      }
+      h1 {
+        margin: 0 0 2px;
+        font-size: 14px;
+      }
+      .sub {
+        margin: 0 0 10px;
+        color: #777;
+        font-size: 11px;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+      .stat {
+        border: 1px solid #d8d8d8;
+        border-radius: 6px;
+        padding: 6px 8px;
+        text-align: center;
+        background: #fafafa;
+      }
+      .stat b {
+        display: block;
+        font-size: 17px;
+        line-height: 1.2;
+      }
+      .stat span {
+        color: #777;
+        font-size: 10px;
+      }
+      .stat.bad b {
+        color: #c62828;
+      }
+      .bar {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+      button {
+        flex: 1;
+        padding: 7px 6px;
+        font-size: 12px;
+        border: 1px solid #cfcfcf;
+        border-radius: 6px;
+        background: #f6f6f6;
+        cursor: pointer;
+      }
+      button.primary {
+        background: #1a73e8;
+        border-color: #1a73e8;
+        color: #fff;
+      }
+      button:hover {
+        filter: brightness(0.97);
+      }
+      #hint {
+        min-height: 18px;
+        margin-bottom: 8px;
+        color: #1a73e8;
+        font-size: 11px;
+      }
+      #list {
+        max-height: 320px;
+        overflow: auto;
+        border: 1px solid #e2e2e2;
+        border-radius: 6px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        padding: 4px 8px;
+        border-bottom: 1px solid #efefef;
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        font-size: 11px;
+      }
+      .row:last-child {
+        border-bottom: 0;
+      }
+      .row.newdoc {
+        background: #fff6e5;
+      }
+      .row.newdoc .kind {
+        font-weight: 700;
+        color: #b26a00;
+      }
+      .row .at {
+        color: #999;
+        flex: 0 0 78px;
+      }
+      .row .kind {
+        flex: 0 0 104px;
+        color: #333;
+      }
+      .row .navtype {
+        flex: 0 0 62px;
+        color: #666;
+      }
+      .row .url {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: #555;
+      }
+      .empty {
+        padding: 16px;
+        text-align: center;
+        color: #999;
+      }
+      .foot {
+        margin-top: 8px;
+        color: #999;
+        font-size: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>翻页重载观测器</h1>
+    <p class="sub">每条 `doc.start` = 页面被整份换掉一次 = 主扩展译图缓存归零。</p>
+
+    <div class="stats">
+      <div class="stat"><b id="s-doc">–</b><span>文档次数</span></div>
+      <div class="stat bad"><b id="s-gap">–</b><span>最长空档</span></div>
+      <div class="stat"><b id="s-alive">–</b><span>当前存活</span></div>
+    </div>
+
+    <div class="bar">
+      <button class="primary" id="btn-copy">复制现场</button>
+      <button id="btn-save">导出 JSON</button>
+      <button id="btn-clear">清空</button>
+    </div>
+    <div id="hint"></div>
+
+    <div id="list"></div>
+    <div class="foot">会话级存储（关浏览器即清）。观测只读，不影响页面。</div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

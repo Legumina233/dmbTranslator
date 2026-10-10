@@ -1,0 +1,29 @@
+{
+  "name": "@dmb/image-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./benchmark": {
+      "types": "./src/benchmark.ts",
+      "default": "./src/benchmark.ts"
+    },
+    "./protocol": {
+      "types": "./src/protocol/index.ts",
+      "default": "./src/protocol/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@dmb/diagnostics": "0.1.0",
+    "@dmb/model-runtime": "0.1.0",
+    "@dmb/text-translation": "0.1.0",
+    "@dmb/translator-core": "0.1.0"
+  }
+}
