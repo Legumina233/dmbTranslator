@@ -4,6 +4,8 @@ import type {
   PhotoState,
 } from '../types';
 import type { ProgressJankMonitor } from '../progressJank';
+// ★ 临时测量（2026-10-11）：只为记录时间线，不参与任何判断。
+import { createProbe } from '../../../shared/probe';
 import { resolveImageReferrerPolicy } from '../utils';
 import { PhotoStateStore } from '../state/photoStateStore';
 import type {
@@ -45,8 +47,19 @@ const defaultRuntime: ImageTranslationRuntime = {
   },
 };
 
+/** 临时测量探针（2026-10-11）：只记录时间线，不参与任何判断。 */
+const probe = createProbe('content');
+
 export class ImageTranslationController {
   private readonly activeActivities = new Map<string, ImageTranslationExecutionActivity>();
+  /**
+   * "这一页当前这次是**后台（预取）**起的"（C 方案 · 2026-10-11 用户拍板）。
+   *
+   * 用途只有一个：用户在某一页点"翻译"时，把**正在跑的后台预取任务**让出来 ——
+   * 你点的菜先上。实测（2026-10-11）：不这么做时，点击后排队 `position=1`，约 3.7 秒后才开始；
+   * 用户口径：那一次预取白做也算不上浪费，因为当前页本来就是第一优先。
+   */
+  private readonly backgroundRuns = new Set<string>();
 
   constructor(
     private readonly stateStore: PhotoStateStore,
@@ -113,8 +126,31 @@ export class ImageTranslationController {
       onImageTranslated: (image) => this.callbacks.persistTranslatedImage?.(key, image),
     });
     this.activeActivities.set(key, activity);
+    // ★ C 方案：记下"这一页当前这次是后台（预取）起的" —— 用户点翻译时优先抢占它。
+    this.backgroundRuns.add(key);
 
-    return this.observeTranslation(key, state, activity, task, undefined, releaseState);
+    return this.observeTranslation(key, state, activity, task, undefined, releaseState)
+      .finally(() => {
+        this.backgroundRuns.delete(key);
+      });
+  }
+
+  /**
+   * 让路（C 方案）：把正在跑的**后台（预取）任务**中止，让用户点的任务先上。
+   *
+   * 为什么不是"排队插队"：后厨一次只做一道菜，挡在你前面的是**正在跑的那一个**，
+   * 插队救不了你（实测：点击后 `position=1`，约 3.7 秒后才开始）。
+   *
+   * 只中止"后台起"的任务；**绝不**中止用户自己点起来的任务。
+   */
+  private preemptBackgroundRuns(exceptKey: string, reason: string): number {
+    let cancelled = 0;
+    for (const backgroundKey of [...this.backgroundRuns]) {
+      if (backgroundKey === exceptKey) continue;
+      this.cancel(backgroundKey, reason);
+      cancelled += 1;
+    }
+    return cancelled;
   }
 
   handleTranslateClick(target: ImageTarget): Promise<void> {
@@ -148,6 +184,11 @@ export class ImageTranslationController {
     }
 
     const clickTarget = this.callbacks.resolveTarget(key) ?? target;
+    // ★ C 方案：用户点这一页 → **正在跑的后台预取立刻让路**。
+    //   必须在这里**同步**做，不能插 `await`：下面到 return 为止要保持同步
+    //   （有测试钉着"点击瞬间同步捕获推文上下文"）。
+    const preempted = this.preemptBackgroundRuns(key, 'preempted-by-current-page');
+    if (preempted > 0) probe('xlate:preempt', { key, cancelled: preempted });
     let contextResolution: ImageTranslationContextResolution | undefined;
     try {
       contextResolution = this.callbacks.resolveTranslationContext?.(clickTarget);
@@ -216,6 +257,13 @@ export class ImageTranslationController {
       onImageTranslated: (image) => this.callbacks.persistTranslatedImage?.(key, image),
     });
     this.activeActivities.set(key, activity);
+    // 抢占竞态兜底：被中止的预取一结算，预取调度器会**立刻**派下一格（它 await 的正是那个任务）。
+    // 那一格若抢在我们前面进了流水线，你的任务又要排在它后面 —— 这里补一次让路。
+    // 只补一次（不是循环）：更晚派出的预取会自然排在**已经排在队列里的你**后面。
+    setTimeout(() => {
+      const late = this.preemptBackgroundRuns(key, 'preempted-by-current-page-late');
+      if (late > 0) probe('xlate:preempt', { key, cancelled: late, late: true });
+    }, 100);
 
     return this.observeTranslation(
       key,
