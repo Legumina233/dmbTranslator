@@ -292,14 +292,18 @@ function ServiceSwitch({ kind, label, running, checked, probing, busy, onToggle 
  * 由它转发到**当前标签页**的内容脚本，再由内容脚本**两层一起**操作
  * （上限以内存层算出的生效值为准，再原样交给 off-screen 那层）。
  *
- * 两条必须守住的口径：
+ * 三条必须守住的口径：
  * - `reached === false` 表示**没连上那个页面的内容脚本**（停在 chrome:// 扩展页 / 不是目标站点），
- *   此时 `size` 无意义 → 显示"未连接"，**不许显示 0 把"没采到"伪装成"缓存是空的"**。
+ *   此时数字无意义 → 显示"未连接"，**不许显示 0 把"没采到"伪装成"缓存是空的"**。
+ * - 显示"有几张"读的是 **`vaultSize`**（off-screen 那层），不是 `size`（内容脚本那层）——
+ *   后者的条数随页面文档生灭，刷新一次就归零，拿它显示会让用户以为缓存被清空了。
  * - 上限改完**必须立刻裁一次**：淘汰只发生在写入时，不裁的话把 15 改成 3，
  *   内存里仍然躺着 15 条，要等译满第 4 张才开始缩 —— 那不是用户要的效果。
  */
 function useTranslationCache(limit: number) {
-  const [info, setInfo] = useState<{ size: number; limit: number; reached: boolean } | null>(null);
+  const [info, setInfo] = useState<
+    { size: number; vaultSize: number; limit: number; reached: boolean } | null
+  >(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -332,7 +336,7 @@ function useTranslationCache(limit: number) {
     try {
       const result = await send('status');
       if (mountedRef.current) {
-        setInfo({ size: result.size, limit: result.limit, reached: result.reached });
+        setInfo({ size: result.size, vaultSize: result.vaultSize, limit: result.limit, reached: result.reached });
       }
     } catch {
       if (mountedRef.current) setInfo(null);
@@ -358,7 +362,7 @@ function useTranslationCache(limit: number) {
       try {
         const result = await send('limit', nextLimit);
         if (!mountedRef.current) return;
-        setInfo({ size: result.size, limit: result.limit, reached: result.reached });
+        setInfo({ size: result.size, vaultSize: result.vaultSize, limit: result.limit, reached: result.reached });
         setNote(
           result.reached
             ? `上限已设为 ${result.limit} 张（现存 ${result.size} 张）`
@@ -380,7 +384,7 @@ function useTranslationCache(limit: number) {
     try {
       const result = await send('clear');
       if (!mountedRef.current) return;
-      setInfo({ size: result.size, limit: result.limit, reached: result.reached });
+      setInfo({ size: result.size, vaultSize: result.vaultSize, limit: result.limit, reached: result.reached });
       setNote(
         result.reached
           ? `已删除全部译图缓存（${result.cleared} 张）`
@@ -481,7 +485,7 @@ function TranslationCacheControl({
           />
           <span className="cache-limit-unit">张</span>
           <span className="local-row-text">
-            {info === null ? '—' : info.reached ? `${info.size} / ${info.limit} 张` : '未连接'}
+            {info === null ? '—' : info.reached ? `${info.vaultSize} / ${info.limit} 张` : '未连接'}
           </span>
           <button
             className="cache-clear-button"
@@ -517,11 +521,12 @@ function TranslationCacheControl({
  * （见 `dmbTranslatorV2-开关冗余度评估与精简方案.md` 的 6 场景穷举），加回来就要重新面对
  * "开关显示开、深度却是 0"两处状态打架的老问题。这里让开关**派生自 `prefetchDepth`**：
  *   · 显示：`depth > 0` = 开，`depth === 0` = 关 —— 唯一真相源，不可能自相矛盾；
- *   · 关 → `0`；开 → 回到**本次弹窗打开期间记下的最后非零深度**，没有记忆就用默认值。
- *   这个"记忆"是**组件内的**（`useRef`），不落 storage、不新增字段 ——
- *   与"设置层不该为 UI 便利多存一份状态"是同一条原则。
- *   （页面右下角那个快捷按钮没有输入框可显示数值，所以它固定"开 = 恢复默认深度"；
- *     同一个动作在设置页有记忆、在快捷按钮无记忆，差异只在"看不看得见数值"。）
+ *   · 关 → `0`；开 → 回到 `lastNonZeroPrefetchDepth`（**设置里的字段**）。
+ *
+ * ★ 2026-10-10 修订：那个"记忆"从**组件内 `useRef`** 提升成了设置字段。
+ *   原来的分工是"设置页有记忆、页面右下角按钮固定恢复默认深度"，理由是"快捷按钮看不见数值"——
+ *   但这让**同一个动作有两套规则**，用户无法预期（在弹窗里调成 8，右下角关一下再开变回 4）。
+ *   现在两处 UI 读同一个字段，规则只剩一条：开 = 回到最近一次设过的非零深度。
  *
  * 与译图缓存行同一套交互口径：输入用**草稿态**，失焦/回车才提交；`0` 是合法值 = 关闭预载。
  */
@@ -534,10 +539,14 @@ function PrefetchControl({
 }) {
   const [draft, setDraft] = useState(String(depth));
 
-  /** 开关"开"时回到的页数。只活在组件里（弹窗关掉即遗忘），不进 storage。 */
-  const lastNonZeroDepth = useRef(
-    defaultPrefetchDepth > 0 ? defaultPrefetchDepth : 1,
-  );
+  /**
+   * 开关"开"时回到的页数。
+   *
+   * 说明（2026-10-11 回退）：这里一度改成读设置里的 `lastNonZeroPrefetchDepth`，
+   * 但那次改动让弹窗在切到「本地模型」时崩掉（用户当场反馈），所以先整体回退到
+   * "组件内记忆"这条既有实现；等有测试护着再重做那半边。
+   */
+  const lastNonZeroDepth = useRef(defaultPrefetchDepth > 0 ? defaultPrefetchDepth : 1);
 
   useEffect(() => {
     setDraft(String(depth));

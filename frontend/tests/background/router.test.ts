@@ -87,8 +87,8 @@ function createServices(settings: ExtensionSettings = defaultExtensionSettings):
     },
     memoryCache: {
       maintain: vi.fn(async (message: MessageOf<'mt:memory-cache'>) => (message.action === 'clear'
-        ? { cache: { size: 0, limit: 200, cleared: 5, reached: true } }
-        : { cache: { size: 7, limit: 200, cleared: 0, reached: true } })),
+        ? { cache: { size: 0, vaultSize: 0, limit: 200, cleared: 5, reached: true } }
+        : { cache: { size: 7, vaultSize: 12, limit: 200, cleared: 0, reached: true } })),
     },
     prefetchConfig: {
       push: vi.fn(async () => undefined),
@@ -243,7 +243,7 @@ describe('routeBackgroundMessage', () => {
     }, sender, services)).resolves.toEqual({
       ok: true,
       type: 'mt:memory-cache',
-      cache: { size: 0, limit: 200, cleared: 5, reached: true },
+      cache: { size: 0, vaultSize: 0, limit: 200, cleared: 5, reached: true },
     });
 
     const limitMessage: MessageOf<'mt:memory-cache'> = {
@@ -254,7 +254,7 @@ describe('routeBackgroundMessage', () => {
     await expect(routeBackgroundMessage(limitMessage, sender, services)).resolves.toEqual({
       ok: true,
       type: 'mt:memory-cache',
-      cache: { size: 7, limit: 200, cleared: 0, reached: true },
+      cache: { size: 7, vaultSize: 12, limit: 200, cleared: 0, reached: true },
     });
     // 转发到当前标签页需要 sender（拿 windowId），所以必须连 sender 一起传下去。
     expect(services.memoryCache.maintain).toHaveBeenCalledWith(limitMessage, sender);

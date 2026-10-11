@@ -181,8 +181,16 @@ export type MemoryCacheMessage = {
 };
 
 export type MemoryCacheResult = {
-  /** 内存里当前几条译图。 */
+  /** 内容脚本**本文档**内存里当前几条译图。随页面文档生灭 —— 刷新页面必归零。 */
   size: number;
+  /**
+   * **off-screen 文档里那份缓存**（真正的「译图缓存」）当前的条数。
+   *
+   * 为什么要单列：缓存分两层，`size` 是短命的那层（`PhotoStateStore`，随页面文档生灭），
+   * 而跨页面重载存活、能攒到上限的是 off-screen 里这一份。弹窗显示"有几张"必须读它，
+   * 否则一刷新数字就归零，用户会以为缓存被清空了。
+   */
+  vaultSize: number;
   /** 当前条数上限。 */
   limit: number;
   /** 本次清掉的条数（clear 才有值）。 */

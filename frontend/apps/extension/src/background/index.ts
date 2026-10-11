@@ -67,6 +67,25 @@ import { createExtensionControlModule } from './extensionControl/extensionContro
 import { registerExtensionControlPort } from './extensionControl/extensionControlPort';
 import { isTrustedPopupSender } from './extensionControl/credentialDisclosurePolicy';
 import { registerContentSessionLifecycle } from './contentSessionLifecycle';
+import { configureProbeRelay, createProbe } from '../shared/probe';
+
+/**
+ * 临时诊断探针（见 `shared/probe.ts`）。
+ *
+ * MV3 的 service worker **每次被唤醒都会重跑模块顶层代码** —— 所以 `sw:loaded`
+ * 出现的次数就是"SW 被重启了几次"，相邻两条的时间差就是它上一次活着的时长。
+ *
+ * ★ 出口直连事件流：SW 不一定收得到自己发的 `runtime.sendMessage`，不能赌那条路。
+ *   注入之后，background 的探针事件与 content / offscreen 的走同一个落点
+ *   （`logs/events/YYYY-MM-DD.events.jsonl`），不需要开控制台读。
+ *   `configureBackgroundEventLog` 之前事件流是关的（no-op），那段窗口内的记录
+ *   仍留在 `chrome.storage.local` 的环形缓冲里兜底。
+ */
+configureProbeRelay((events) => {
+  for (const event of events) emitBackgroundEvent(event);
+});
+const probe = createProbe('background');
+probe('sw:loaded');
 
 /**
  * M2 · 下载失败的旁路出口。

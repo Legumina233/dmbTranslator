@@ -24,7 +24,7 @@ function numberOr(value: unknown, fallback: number): number {
 }
 
 function unreachable(): MemoryCacheResult {
-  return { size: 0, limit: 0, cleared: 0, reached: false };
+  return { size: 0, vaultSize: 0, limit: 0, cleared: 0, reached: false };
 }
 
 /**
@@ -80,6 +80,8 @@ export async function maintainMemoryCache(
     const cache = response.cache;
     return {
       size: numberOr(cache.size, 0),
+      // off-screen 那层的条数：弹窗显示"有几张"读的是它（内容脚本那层刷新即归零）。
+      vaultSize: numberOr(cache.vaultSize, 0),
       limit: numberOr(cache.limit, 0),
       cleared: numberOr(cache.cleared, 0),
       reached: true,

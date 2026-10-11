@@ -12,6 +12,7 @@ import {
 import { createPrefetchExecutor } from './core/scheduler/prefetchExecutor';
 import { defaultPrefetchDepth, normalizePrefetchDepth } from '../shared/config';
 import { sendRuntimeMessage } from '../shared/messages';
+import { createProbe, flushProbeRelay } from '../shared/probe';
 import { getExtensionApi, isExtensionContextInvalidated, type ExtensionPort } from '../shared/extensionRuntime';
 import { toErrorMessage } from '../shared/utils';
 import {
@@ -59,17 +60,77 @@ const core = new TranslatorCore(adapter, contentSessionId);
 core.start();
 bindContentLifecycle(core, contentSessionPort);
 
+// --- 临时测量（2026-10-11）：只记录时间线，**不参与任何判断、不影响功能** ---
+// 要回答三个问题：
+//   ① 站点什么时候才算"接受"一次翻页（改网址？换图？原图加载完？）→ 决定"抢先贴译图"能不能安全保留；
+//   ② 快速连点两下时，站点到底有没有真的翻到第二下那一页；
+//   ③ 我们现在用的图源（站点 showpage JSON）什么时候才到手 → 这就是"慢半拍"的量化值。
+type PageActionProbe = {
+  at: number;
+  kind: 'keyboard' | 'click';
+  gid: number;
+  fromPage: number;
+  targetPage: number;
+  /** 目标页的译图当时在不在内存里（= 会不会出现"译图先于原图"）。 */
+  cached: boolean;
+  elementSrc: string;
+};
+let lastPageAction: PageActionProbe | null = null;
+
+/** 图址的尾巴（去掉 keystamp 之类的查询串，便于人读日志）。 */
+function srcTail(url: string): string {
+  if (!url) return '';
+  try {
+    const parsed = new URL(url, location.href);
+    return parsed.pathname.split('/').pop() ?? '';
+  } catch {
+    return url.slice(-24);
+  }
+}
+
 // --- 意图即换图（2026-10-04）：点击/方向键的瞬间，目标页就写在 anchor href / ±1 里，
 // 译图已在内存 → 画框立即换，不等站点 api.php 往返（实测省 ~0.5-1s）。
 // 导航意图与结果不符时，下一次 sync 会用当前页状态自我纠正（画框常驻，无需回滚）。
 if (adapter === ehentaiAdapter) {
-  const intentShow = (page: number): void => {
+  // ★ 临时测量：把"画框入口"包一层，记录每一次现身/隐身（谁、在哪个网址页码下、贴了哪一页）。
+  //   只是转发，不改行为；万一包不上（被冻结等）就自动跳过，测量降级但功能不受影响。
+  const originalApplyOverlay = adapter.applyOverlayImage?.bind(adapter);
+  if (originalApplyOverlay) {
+    adapter.applyOverlayImage = (target, url) => {
+      probe('overlay:apply', {
+        key: target.key,
+        shown: url !== null,
+        pathPage: parseEhentaiPageIdentity(location.pathname)?.page ?? null,
+      });
+      return originalApplyOverlay(target, url);
+    };
+  }
+  const intentShow = (page: number, kind: 'keyboard' | 'click'): void => {
     const identity = parseEhentaiPageIdentity(location.pathname);
     if (!identity) return;
+    const img = document.getElementById('img') as HTMLImageElement | null;
+    // ★ 临时测量：动作本身 + 目标页译图在不在手 + 站点那张图此刻是什么。**不改变下面的任何判断。**
+    const at = probe.mark();
+    const cached = core.getTranslatedUrl(`${identity.gid}-${page}`) !== null;
+    lastPageAction = {
+      at,
+      kind,
+      gid: identity.gid,
+      fromPage: identity.page,
+      targetPage: page,
+      cached,
+      elementSrc: img?.currentSrc || img?.src || '',
+    };
+    probe.timed('page:action', at, {
+      kind,
+      fromPage: identity.page,
+      targetPage: page,
+      cached,
+      src: srcTail(lastPageAction.elementSrc),
+    });
     if (!core.isDisplayModeTranslated()) return; // 全局原图模式：画框不抢戏
     const url = core.getTranslatedUrl(`${identity.gid}-${page}`);
     if (!url) return;
-    const img = document.getElementById('img') as HTMLImageElement | null;
     if (!img) return;
     adapter.applyOverlayImage?.(
       { element: img, key: `${identity.gid}-${identity.page}`, originalUrl: img.currentSrc || img.src },
@@ -79,8 +140,8 @@ if (adapter === ehentaiAdapter) {
   window.addEventListener('keydown', (ev) => {
     const identity = parseEhentaiPageIdentity(location.pathname);
     if (!identity) return;
-    if (ev.key === 'ArrowRight') intentShow(identity.page + 1);
-    else if (ev.key === 'ArrowLeft') intentShow(identity.page - 1);
+    if (ev.key === 'ArrowRight') intentShow(identity.page + 1, 'keyboard');
+    else if (ev.key === 'ArrowLeft') intentShow(identity.page - 1, 'keyboard');
   }, true);
   window.addEventListener('click', (ev) => {
     if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
@@ -89,7 +150,7 @@ if (adapter === ehentaiAdapter) {
     if (!href) return;
     try {
       const m = /^\/s\/[0-9a-f]+\/(\d+)-(\d+)(?:[?#/]|$)/i.exec(new URL(href, location.href).pathname);
-      if (m) intentShow(Number(m[2]));
+      if (m) intentShow(Number(m[2]), 'click');
     } catch { /* 非法 href 忽略 */ }
   }, true);
 }
@@ -107,6 +168,12 @@ if (adapter === ehentaiAdapter) {
  *
  * **当前页不自动翻译**（保持"点按钮才译"；要开自动译，用设置里的「进入自动翻译」）。
  */
+/**
+ * 临时诊断探针（见 `shared/probe.ts`）：记录页面进退场/可见性/导航，
+ * 以及预取与缓存两条消息的到达情况。**只记录，不改变行为。**
+ */
+const probe = createProbe('content');
+
 const PREFETCH_ENABLED = true;
 /**
  * 预取设置补丁：**弹窗推来的变更**（`mt:prefetch-config`）
@@ -364,6 +431,8 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
   prefetchProgressTimer = window.setInterval(() => {
     // 关着预载时标签恒为"预载关闭"、没有可刷新的进度 —— 不必每秒白重绘一次。
     if (executor.snapshot().depth > 0) renderPageToggles();
+    // ★ 临时测量：站点可能整个换掉那个 `<img>` 元素，这里补挂一次观察（幂等、不改行为）。
+    probeObserveImage();
   }, 1000);
 
   const client = createShowpageClient({
@@ -372,6 +441,11 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
     getEndpoint: () => deriveShowpageEndpoint(location.hostname),
     onJson: (pageKey, json) => {
       jsonStore.set(pageKey, json);
+      // ★ 临时测量：这一页的站点数据什么时候到手 —— 这就是现在"当前页图源"的等待时间。
+      probe.timed('page:json', lastPageAction?.at ?? probe.mark(), {
+        page: pageKey,
+        targetPage: lastPageAction?.targetPage ?? null,
+      });
       executor.onShowpageJson(pageKey, json);
       chain.onShowpageJson(pageKey, json);
       publishTelemetry();
@@ -388,16 +462,62 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
     },
   });
 
+  // ── 临时测量：盯住站点那张 `<img>` —— 它的 src 什么时候换、原图什么时候加载完 ──────
+  // 这两个时刻是回答"站点什么时候算接受翻页"的关键；只记录，不做任何事。
+  let probeImage: HTMLImageElement | null = null;
+  let probeSrcObserver: MutationObserver | null = null;
+  let probeLastSrc = '';
+  function probeSrcReport(event: string): void {
+    const identity = parseEhentaiPageIdentity(location.pathname);
+    probe.timed(event, lastPageAction?.at ?? probe.mark(), {
+      pathPage: identity ? identity.page : null,
+      targetPage: lastPageAction?.targetPage ?? null,
+      // 站点有没有翻到"用户想去的那一页"—— 这就是"接受 / 没接受"的判据。
+      accepted: identity !== null && lastPageAction !== null
+        ? identity.page === lastPageAction.targetPage
+        : null,
+      src: srcTail(probeLastSrc),
+    });
+  }
+  function probeOnImageLoad(): void {
+    probeSrcReport('page:onload');
+  }
+  function probeObserveImage(): void {
+    const element = adapter.findImages()[0]?.element as HTMLImageElement | undefined;
+    if (!element || element === probeImage) return;
+    probeImage?.removeEventListener('load', probeOnImageLoad);
+    probeSrcObserver?.disconnect();
+    probeImage = element;
+    probeLastSrc = element.currentSrc || element.src || '';
+    element.addEventListener('load', probeOnImageLoad);
+    probeSrcObserver = new MutationObserver(() => {
+      const next = element.currentSrc || element.src || '';
+      if (next === probeLastSrc) return;
+      probeLastSrc = next;
+      probeSrcReport('page:src');
+    });
+    probeSrcObserver.observe(element, { attributes: true, attributeFilter: ['src'] });
+  }
+
   let lastPathname = '';
   const onMaybeNavigated = (): void => {
     if (location.pathname === lastPathname) return;
     lastPathname = location.pathname;
     const identity = parseEhentaiPageIdentity(location.pathname);
+    probe('page:navigate', { path: location.pathname, isReadingPage: identity !== null });
     if (!identity) return; // 非阅读页（画廊页等）：预取整体不参与
+    // ★ 临时测量：网址页码变化 = 站点"答应"翻页的时刻（与你的动作相隔多久、是不是你想去的那页）。
+    probe.timed('page:path', lastPageAction?.at ?? probe.mark(), {
+      from: lastPageAction?.fromPage ?? null,
+      to: identity.page,
+      targetPage: lastPageAction?.targetPage ?? null,
+      accepted: lastPageAction !== null ? identity.page === lastPageAction.targetPage : null,
+    });
     lastGid = identity.gid;
     if (captureShowkey()) client.notifyReady(); // showkey 就绪：冲掉排队中的请求
     executor.onPageArrived(identity); // 窗口平移：近页排上、出窗的离队
     chain.onPageArrived(identity, extractImgkeyFromPathname(location.pathname));
+    probeObserveImage();
     publishTelemetry();
   };
 
@@ -668,11 +788,85 @@ document.addEventListener('mouseleave', () => {
 // Listen for context-menu translate requests from background
 const chromeApi = getExtensionApi();
 
+// ── 探针：内容脚本每次被注入就留一条（证明本次是"全新注入"还是旧实例仍在）──
+// ★ `navType` 就是"手动刷新 vs 站点自己触发的刷新"的判据：
+//   `reload` = 用户按 F5 / 右键刷新（站点代码也可能调 location.reload()）；
+//   `navigate` = 一次普通导航（点下一页、站点改 location.href 都算这类）；
+//   `back_forward` = 前进/后退（可能命中 bfcache，此时不该重新注入）。
+//   两者若都是真导航，`pagehide(persisted=false)` 就是同一条路径 —— 数据上可验证。
+function currentNavType(): string {
+  try {
+    const entry = performance.getEntriesByType('navigation')[0] as
+      | PerformanceNavigationTiming
+      | undefined;
+    return entry?.type ?? 'unknown';
+  } catch {
+    return 'unsupported';
+  }
+}
+probe('content:loaded', {
+  url: location.href,
+  visibility: document.visibilityState,
+  navType: currentNavType(),
+  // ★ 判定"页面无操作自动刷新"的硬证据（2026-10-10 补）：
+  //   · `wasDiscarded` = 本页上一次是被浏览器**内存回收丢弃**的（tab discarding）。
+  //     这类"重新加载"不是站点刷的、也不是用户点的 —— 用户看到的正是"我没动它，它自己刷新了"。
+  //     它只发生在后台标签页被丢弃后重新激活时，且**不稳定复现**（取决于当时的内存压力）。
+  //   · `timeOrigin` = 换了就证明文档真的重建过（与探针每条的 `to` 互为印证）。
+  wasDiscarded: readWasDiscarded(),
+  timeOrigin: typeof performance.timeOrigin === 'number' ? Math.round(performance.timeOrigin) : undefined,
+});
+
+/** `document.wasDiscarded` 是 Page Lifecycle 的非标准字段，取不到就当未知。 */
+function readWasDiscarded(): boolean | undefined {
+  try {
+    const value = (document as Document & { wasDiscarded?: boolean }).wasDiscarded;
+    return typeof value === 'boolean' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ── Page Lifecycle（Chrome）：内存压力下标签页会先被 **freeze**、再被 **discard** ──
+// 与 `page:hide / page:show(persisted)` 合起来就是"无操作自动刷新"的完整判据链：
+//   freeze → 页面被挂起（还没丢）；resume → 解冻；discard → 下次进来是全新文档。
+document.addEventListener('freeze', () => {
+  probe('page:freeze', { path: location.pathname, visibility: document.visibilityState });
+});
+document.addEventListener('resume', () => {
+  probe('page:resume', { path: location.pathname, visibility: document.visibilityState });
+});
+
+// ── 探针：页面进退场与可见性 —— "到底有没有自动刷新"看这三条即可 ──
+// `page:hide` 的 `persisted` 区分"真卸载"与"进 bfcache"；
+// `page:show` 的 `persisted` 区分"从 bfcache 解冻"与"真重载"。
+window.addEventListener('pageshow', (event) => {
+  probe('page:show', {
+    persisted: event.persisted,
+    path: location.pathname,
+    visibility: document.visibilityState,
+  });
+});
+document.addEventListener('visibilitychange', () => {
+  probe('page:visibility', {
+    state: document.visibilityState,
+    path: location.pathname,
+  });
+});
+
 // 页面退场时的内容侧收尾：事件缓冲冲出去、预载进度停表。
 // 统一在模块级收口 —— `stopPrefetchProgressTimer` 在非 e-hentai 页是 no-op，
 // `flushContentEventLog` 则对所有站点都有效。
 window.addEventListener('pagehide', (event) => {
+  probe('page:hide', {
+    persisted: event.persisted,
+    path: location.pathname,
+    visibility: document.visibilityState,
+  });
   flushContentEventLog();
+  // 探针自己的事件流批量窗口是 250ms：卸载前冲一次，否则最后几条会随上下文消失。
+  // （探针的 storage 兜底通道不受影响，它每条都立即排队写。）
+  flushProbeRelay();
   // bfcache（persisted=true）里页面还会回来，先别停表 —— 与 `bindContentLifecycle` 同口径。
   if (!event.persisted) stopPrefetchProgressTimer();
 });
@@ -766,6 +960,14 @@ const handleRuntimeMessage = (message: unknown, _sender: unknown, sendResponse: 
     // 预取设置（预载页数 + 进入自动翻译）：弹窗改 → 后台转发到这里直接生效。
     // 与 mt:memory-cache 同口径：内容脚本没有 settings，只能被推。
     if (message.type === 'mt:prefetch-config') {
+      // 探针：`applied` = 本页到底有没有可写的执行器。
+      // 非 e-hentai 页此处为 false —— 推送会"回成功但什么都不做"，这一行专门记它。
+      probe('msg:prefetch-config', {
+        prefetchDepth: message.prefetchDepth,
+        autoTranslateOnEnter: message.autoTranslateOnEnter,
+        applied: applyPrefetchConfig !== null,
+        path: location.pathname,
+      });
       // 用共享的 `PrefetchConfigPatch` 收窄，不在本地再写一遍断言 —— 字段增删只改一处，
       // 不会再出现"本地断言漏了一个字段、于是那条路径在类型上隐形"的情况。
       applyPrefetchConfig?.(message as PrefetchConfigPatch);
@@ -773,19 +975,38 @@ const handleRuntimeMessage = (message: unknown, _sender: unknown, sendResponse: 
       return true;
     }
 
-    // 弹窗读写**内存里的译图缓存**（2026-10-03 起落盘关闭，缓存只活在内容脚本里，
-    // 所以后台把这条消息转发到当前标签页，由这里直接操作 PhotoStateStore）。
+    // 弹窗读写**译图缓存**。缓存分两层：本文档的 `PhotoStateStore`（随文档生灭）与
+    // off-screen 文档代理的 **IndexedDB 落盘缓存**（跨 SW 重启/浏览器重启存活）。
+    // 「改上限 / 清空」由这里两层一起操作；「看有几张」必须报落盘那层的条数
+    // （`vaultSize`），否则刷新一次数字就归零，用户会以为缓存被清了。
     if (message.type === 'mt:memory-cache') {
-      const cache = ((): { size: number; limit: number; cleared: number } => {
-        if (message.action === 'clear') {
-          return core.clearMemoryCache();
-        }
-        if (message.action === 'limit' && typeof message.limit === 'number') {
-          return { ...core.setMemoryCacheLimit(message.limit), cleared: 0 };
-        }
-        return { ...core.getMemoryCacheInfo(), cleared: 0 };
+      void (async (): Promise<void> => {
+        const cache = ((): { size: number; limit: number; cleared: number } => {
+          if (message.action === 'clear') {
+            return core.clearMemoryCache();
+          }
+          if (message.action === 'limit' && typeof message.limit === 'number') {
+            return { ...core.setMemoryCacheLimit(message.limit), cleared: 0 };
+          }
+          return { ...core.getMemoryCacheInfo(), cleared: 0 };
+        })();
+        // clear 的 off-screen 那半是 `void` 发出的（不阻塞页面），读取排在它之后投递，
+        // 由 broker 保证的投递顺序即可拿到清空后的真实条数。
+        const vault = await core.getVaultCacheSize();
+        // 探针：弹窗读到的那个数字，在页面侧长什么样。
+        probe('msg:memory-cache', {
+          action: message.action,
+          documentLayerSize: cache.size,
+          vaultSize: vault.size,
+          vaultReached: vault.reached,
+        });
+        sendResponse({
+          ok: true,
+          type: 'mt:memory-cache',
+          // ★ `reached=false` = 没读到（宿主失联），弹窗显示「未连接」而不是"0 张"。
+          cache: { ...cache, vaultSize: vault.size, reached: vault.reached },
+        });
       })();
-      sendResponse({ ok: true, type: 'mt:memory-cache', cache: { ...cache, reached: true } });
       return true;
     }
 

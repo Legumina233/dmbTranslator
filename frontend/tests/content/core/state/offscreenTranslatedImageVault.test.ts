@@ -106,7 +106,7 @@ describe('createOffscreenTranslatedImageVault', () => {
     });
 
     // 另一个站点（另一个命名空间）的键不能漏回来，否则两个站点会互相串图。
-    await expect(pending).resolves.toEqual(['123-4', '7-1']);
+    await expect(pending).resolves.toEqual({ status: 'ok', value: ['123-4', '7-1'] });
     expect(port.disconnected).toBe(true);
   });
 
@@ -135,20 +135,23 @@ describe('createOffscreenTranslatedImageVault', () => {
     });
     port.emit({ type: 'vault-image-complete', requestId: port.requestId() });
 
-    const blob = await pending;
+    const result = await pending;
+    expect(result.status).toBe('ok');
+    const blob = result.status === 'ok' ? result.value : undefined;
     expect(blob).toBeInstanceOf(Blob);
     expect(blob?.type).toBe('image/png');
     expect(Buffer.from(await blob!.arrayBuffer()).toString()).toBe('translated');
   });
 
-  it('reports a miss as undefined', async () => {
+  it('reports a miss as an ok result with no value', async () => {
     const vault = createVault();
     const pending = vault.get('123-4');
 
     const port = ports[0]!;
     port.emit({ type: 'vault-image', requestId: port.requestId(), found: false });
 
-    await expect(pending).resolves.toBeUndefined();
+    // 「没有这张」是**成功回答**，与「读不到」是两件事。
+    await expect(pending).resolves.toEqual({ status: 'ok', value: undefined });
   });
 
   it('uploads an image as a namespaced chunked request', async () => {
@@ -166,7 +169,7 @@ describe('createOffscreenTranslatedImageVault', () => {
     expect(port.sent[2]).toMatchObject({ type: 'vault-put-complete' });
 
     port.emit({ type: 'vault-stored', requestId: port.requestId() });
-    await expect(pending).resolves.toBeUndefined();
+    await expect(pending).resolves.toEqual({ status: 'ok', value: undefined });
   });
 
   it('clears the store', async () => {
@@ -177,23 +180,35 @@ describe('createOffscreenTranslatedImageVault', () => {
     expect(port.sent[0]).toMatchObject({ type: 'vault-clear' });
     port.emit({ type: 'vault-cleared', requestId: port.requestId() });
 
-    await expect(pending).resolves.toBeUndefined();
+    await expect(pending).resolves.toEqual({ status: 'ok', value: undefined });
   });
 
-  it('degrades to "no cache" on failure and on timeout without throwing', async () => {
+  it('reports "unavailable" (with the reason) instead of an empty cache on failure', async () => {
+    // ★ 这条钉住 2026-10-10 的修订：宿主明确失败时**不许**再回 `[]` / `undefined` ——
+    //   那会把"读不到"伪装成"缓存是空的"，真机排查被带偏过（日志里全是 count=0）。
     const vault = createVault();
     const failed = vault.loadKeys();
     const failedPort = ports[0]!;
-    failedPort.emit({ type: 'vault-failed', requestId: failedPort.requestId(), message: '宿主不可用' });
-    await expect(failed).resolves.toEqual([]);
+    failedPort.emit({
+      type: 'vault-failed',
+      requestId: failedPort.requestId(),
+      message: '译图缓存宿主不可用',
+    });
+    await expect(failed).resolves.toEqual({
+      status: 'unavailable',
+      reason: '译图缓存宿主不可用',
+    });
 
-    // 端到端不响应 → 超时同样只是"没读到"，不是异常。
+    // 端到端不响应 → 超时同样算"不可达"，并且带上原因（不是异常）。
     vi.useFakeTimers();
     try {
       const failing = createVault({ timeoutMs: 50 });
       const pending = failing.get('123-4');
       await vi.advanceTimersByTimeAsync(60);
-      await expect(pending).resolves.toBeUndefined();
+      await expect(pending).resolves.toMatchObject({
+        status: 'unavailable',
+        reason: expect.stringContaining('超时'),
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -202,18 +217,26 @@ describe('createOffscreenTranslatedImageVault', () => {
     const dropped = createVault();
     const pending = dropped.loadKeys();
     ports.at(-1)!.disconnect();
-    await expect(pending).resolves.toEqual([]);
+    await expect(pending).resolves.toMatchObject({
+      status: 'unavailable',
+      reason: expect.stringContaining('断开'),
+    });
   });
 
-  it('reports an empty cache when the extension runtime is unavailable', async () => {
+  it('reports every operation as unavailable when the extension runtime is gone', async () => {
     (globalThis as { chrome?: unknown }).chrome = undefined;
     (globalThis as { browser?: unknown }).browser = undefined;
     const vault = createVault();
 
-    await expect(vault.loadKeys()).resolves.toEqual([]);
-    await expect(vault.get('123-4')).resolves.toBeUndefined();
-    await expect(vault.put('123-4', new Blob(['x']))).resolves.toBeUndefined();
-    await expect(vault.clear()).resolves.toBeUndefined();
+    for (const pending of [
+      vault.loadKeys(),
+      vault.get('123-4'),
+      vault.put('123-4', new Blob(['x'])),
+      vault.setLimit(3),
+      vault.clear(),
+    ]) {
+      await expect(pending).resolves.toMatchObject({ status: 'unavailable' });
+    }
     expect(ports).toEqual([]);
   });
 });

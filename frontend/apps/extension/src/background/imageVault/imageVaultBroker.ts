@@ -9,9 +9,28 @@ import {
   type ImageVaultClientMessage,
 } from '../../shared/imageVaultProtocol';
 import type { PipelineHostLifecycle } from '../localPipeline/pipelineHostLifecycle';
+import { createProbe } from '../../shared/probe';
 
-/** 等 off-screen 文档把译图缓存宿主端口接上来的上限（与流水线宿主的连接超时同量级）。 */
-export const IMAGE_VAULT_HOST_CONNECT_TIMEOUT_MS = 10_000;
+/** 临时诊断探针（见 `shared/probe.ts`）。 */
+const probe = createProbe('background');
+
+/**
+ * 等 off-screen 文档把译图缓存宿主端口接上来的上限。
+ *
+ * ★ 2026-10-10：从 10s 降到 2s。真机事故（15:47:07）里这条链路让**页面加载卡了 8168ms**，
+ * 而当时的真相是"宿主根本起不来"——等 10 秒不会让它起来，只会让用户多等。
+ * 缓存是加速器：拿不到就该**快速退回"无缓存"**，而不是拖住主流程。
+ */
+export const IMAGE_VAULT_HOST_CONNECT_TIMEOUT_MS = 2_000;
+
+/**
+ * 强制复位后**第二次**等端口的上限。
+ *
+ * 比第一次短：这一步的前提是"文档刚被我们亲手关掉、刚重新创建"，真机里
+ * `offscreen:document-loaded` → `host-attached` 只隔 4ms（15:44:41.271 → .275），
+ * 所以 1 秒足够；再等不到就说明重建也失败了，早点让调用方退回"无缓存"。
+ */
+export const IMAGE_VAULT_HOST_RECOVER_TIMEOUT_MS = 1_000;
 
 /**
  * 等宿主端口的等待者。**同时最多一个**：`ensureHost()` 是单飞的（`creationPromise`），
@@ -89,12 +108,14 @@ export class ImageVaultBroker {
       this.hostPort.disconnect();
     }
     this.hostPort = port;
+    probe('vault-broker:host-attached');
     guardRegistration(() => port.onMessage.addListener(guardExtensionListener((message) => {
       this.handleHostMessage(port, message);
     })));
     guardRegistration(() => port.onDisconnect.addListener(guardExtensionListener(() => {
       if (this.hostPort !== port) return;
       this.hostPort = null;
+      probe('vault-broker:host-disconnected', { pending: this.pending.size });
       // 宿主没了就没有人能回执了：把在途请求全部就地了结，别让内容脚本等到超时。
       for (const [requestId, client] of [...this.pending]) {
         this.pending.delete(requestId);
@@ -109,6 +130,7 @@ export class ImageVaultBroker {
   }
 
   private attachClient(port: ExtensionPort): void {
+    probe('vault-broker:client-attached');
     guardRegistration(() => port.onMessage.addListener(guardExtensionListener((message) => {
       void this.handleClientMessage(port, message);
     })));
@@ -138,6 +160,7 @@ export class ImageVaultBroker {
 
     const host = await this.ensureHost();
     if (!host) {
+      probe('vault-broker:host-unavailable', { requestId, type: value.type });
       this.pending.delete(requestId);
       safelyPost(client, {
         type: 'vault-failed',
@@ -168,10 +191,7 @@ export class ImageVaultBroker {
   private ensureHost(): Promise<ExtensionPort | null> {
     if (this.hostPort) return Promise.resolve(this.hostPort);
     if (!this.creationPromise) {
-      this.creationPromise = (async () => {
-        await this.lifecycle.ensureHost();
-        await this.waitForHost();
-      })()
+      this.creationPromise = this.attachHostWithRecovery()
         .catch(() => undefined)
         .finally(() => {
           this.creationPromise = null;
@@ -180,15 +200,55 @@ export class ImageVaultBroker {
     return this.creationPromise.then(() => this.hostPort);
   }
 
-  private waitForHost(): Promise<void> {
+  /**
+   * 建宿主 → 等端口；**等不到就强制复位一次再试**。
+   *
+   * ★ 2026-10-10（真机事故 15:46–15:48）：`lifecycle.ensureHost()` 内部先问 `hasHost()`，
+   *   而 `hasHost()` **只判断"这个文档存不存在"**，不判断"我们的宿主有没有把端口接上来"。
+   *   service worker 重启之后，`getContexts()` 可能仍报一个连不上来的**僵尸文档**：
+   *   于是 `ensureHost()` 直接 return、**永不** `createDocument()`，我们只能干等超时。
+   *   日志指纹：7 次 `ensure-host-start` / **0 次** `offscreen:document-loaded` / 6 次
+   *   `host-unavailable` —— 缓存就此永久不可达（"刷新后什么都没了"）。
+   *
+   *   处置与 `PipelineHostBroker.ensurePipelineHost()` 同款：`closeDocument()` 掉那个文档
+   *   → 清掉本地端口引用 → 重新 `createDocument()` → 再等一次。
+   *
+   *   代价要说清楚：**关文档会连带结束同文档里的流水线宿主**（两者共用一个 off-screen 文档）。
+   *   所以这一步只在"等了 `IMAGE_VAULT_HOST_CONNECT_TIMEOUT_MS` 仍无人应答"时才做 ——
+   *   那个状态本身就说明这个文档用不了；而且重试窗口取得很短（见下面的常量）。
+   */
+  private async attachHostWithRecovery(): Promise<void> {
+    probe('vault-broker:ensure-host-start');
+    await this.lifecycle.ensureHost();
+    await this.waitForHost();
+    if (this.hostPort) return;
+
+    probe('vault-broker:host-reset');
+    try {
+      await this.lifecycle.closeHost();
+    } catch {
+      // 它可能已经自己消失了：这里失败不影响后面的重建。
+    }
+    this.hostPort = null;
+    try {
+      await this.lifecycle.ensureHost();
+    } catch {
+      // 建不出来就走下面的兜底（和"没建出来"一样处理）。
+    }
+    await this.waitForHost(IMAGE_VAULT_HOST_RECOVER_TIMEOUT_MS);
+    if (!this.hostPort) probe('vault-broker:host-reset-failed');
+  }
+
+  private waitForHost(timeoutMs: number = IMAGE_VAULT_HOST_CONNECT_TIMEOUT_MS): Promise<void> {
     if (this.hostPort) return Promise.resolve();
     return new Promise<void>((resolve) => {
       this.hostWaiter = {
         resolve,
         timer: setTimeout(() => {
           this.hostWaiter = null;
+          probe('vault-broker:host-timeout', { ms: timeoutMs });
           resolve();
-        }, IMAGE_VAULT_HOST_CONNECT_TIMEOUT_MS),
+        }, timeoutMs),
       };
     });
   }

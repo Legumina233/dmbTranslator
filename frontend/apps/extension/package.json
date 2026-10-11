@@ -1,6 +1,6 @@
 {
   "name": "@dmb/extension",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "license": "GPL-3.0-or-later",
   "private": true,
   "type": "module",
@@ -17,7 +17,6 @@
     "build:firefox": "npm run typecheck && npm run clean:legacy-dist && npm run build:firefox:bundle",
     "build": "npm run typecheck && npm run clean:legacy-dist && npm run build:chromium:bundle && npm run build:firefox:bundle && node ../../scripts/check-extension-parity.mjs --chromium dist-chromium --firefox dist-firefox",
     "build:benchmark": "npm run build:chromium && vite build --mode benchmark && node ../../scripts/check-release-boundaries.mjs --target chromium --dist dist-chromium --benchmark",
-    "lint:firefox": "node ../../scripts/check-firefox-lint.mjs --dist dist-firefox",
     "preview": "vite preview"
   },
   "dependencies": {

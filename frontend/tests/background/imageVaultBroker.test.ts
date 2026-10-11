@@ -150,12 +150,70 @@ describe('ImageVaultBroker', () => {
     client.emit({ type: 'vault-list', requestId: 'r1' });
     await flush();
 
-    // 快速失败，不拖到 10s 的"等宿主连接"超时 —— 缓存是加速器，缺了就该立刻退回"无缓存"。
+    // 快速失败，不拖到"等宿主连接"的超时 —— 缓存是加速器，缺了就该立刻退回"无缓存"。
     expect(client.sent).toEqual([{
       type: 'vault-failed',
       requestId: 'r1',
       message: '译图缓存宿主不可用',
     }]);
+  });
+
+  it('recovers from a stale host context by closing and recreating it once', async () => {
+    // 真机事故（2026-10-10 15:46–15:48）：service worker 重启后 `getContexts()` 仍报一个
+    // 连不上来的僵尸文档 → lifecycle.ensureHost() 直接 return、永不 createDocument →
+    // 只能干等超时（日志：7 次 ensure-host-start / 0 次 document-loaded）。
+    // 现在超时后**强制复位一次**：closeDocument → 重建 → 再等。
+    vi.useFakeTimers();
+    try {
+      const host = new FakePort(IMAGE_VAULT_HOST_PORT);
+      const client = new FakePort(IMAGE_VAULT_CLIENT_PORT);
+      let ensureCalls = 0;
+      let broker!: ImageVaultBroker;
+      const ensureHost = vi.fn(async () => {
+        ensureCalls += 1;
+        // 第一次：只报"文档存在"（僵尸），宿主永远不接上来；复位重建时才真的接上。
+        if (ensureCalls === 1) return undefined;
+        broker.handlePort(host);
+        return undefined;
+      });
+      const closeHost = vi.fn(async () => undefined);
+      broker = new ImageVaultBroker(createLifecycle({ ensureHost, closeHost }));
+      broker.handlePort(client);
+
+      client.emit({ type: 'vault-list', requestId: 'r1' });
+      await vi.advanceTimersByTimeAsync(2_100); // 第一次等端口超时 → 触发复位
+      await vi.advanceTimersByTimeAsync(10);    // 第二次：宿主已接上
+
+      expect(closeHost).toHaveBeenCalledTimes(1);
+      expect(ensureHost).toHaveBeenCalledTimes(2);
+      expect(host.sent).toEqual([{ type: 'vault-list', requestId: 'r1' }]);
+      expect(client.sent).toEqual([]); // 没有回失败：请求被成功转发了
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up after the recovery attempt fails too', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new FakePort(IMAGE_VAULT_CLIENT_PORT);
+      // ensureHost 成功但永远没有宿主端口接上来。
+      const broker = new ImageVaultBroker(createLifecycle());
+      broker.handlePort(client);
+
+      client.emit({ type: 'vault-list', requestId: 'r1' });
+      await vi.advanceTimersByTimeAsync(2_100); // 第一次超时
+      await vi.advanceTimersByTimeAsync(1_100); // 复位后的第二次也超时
+
+      // 最坏情况有明确上界（2s + 1s），然后如实回失败 —— 不悬挂。
+      expect(client.sent).toEqual([{
+        type: 'vault-failed',
+        requestId: 'r1',
+        message: '译图缓存宿主不可用',
+      }]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps a request bound to the connection that opened it', async () => {

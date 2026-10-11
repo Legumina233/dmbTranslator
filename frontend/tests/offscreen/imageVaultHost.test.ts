@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ExtensionPort } from '../../apps/extension/src/shared/extensionRuntime';
 import { ImageVaultHost } from '../../apps/extension/src/offscreen/imageVaultHost';
-import { TranslatedImageMemoryVault } from '../../apps/extension/src/offscreen/translatedImageMemoryVault';
+import {
+  createTranslatedImageCache,
+  type TranslatedImageCache,
+} from '../../apps/extension/src/offscreen/translatedImageCacheStore';
+import { createInMemoryStoragePort } from '../helpers/inMemoryTranslatedImageStoragePort';
 import { IMAGE_VAULT_HOST_PORT } from '../../apps/extension/src/shared/imageVaultProtocol';
 
 /**
@@ -64,13 +68,15 @@ function flush(): Promise<void> {
 
 describe('ImageVaultHost', () => {
   let port: FakePort;
-  let vault: TranslatedImageMemoryVault;
+  let vault: TranslatedImageCache;
   let originalChrome: unknown;
   let originalFileReader: unknown;
 
   beforeEach(() => {
     port = new FakePort();
-    vault = new TranslatedImageMemoryVault();
+    // 用**真实的缓存实现** + 内存存储端口：宿主这一层的读写/淘汰语义被真实执行到，
+    // 只有最底下那层 IndexedDB 调用被替换（node 环境没有 IDB）。
+    vault = createTranslatedImageCache({ port: createInMemoryStoragePort().port, limit: 15 });
     originalChrome = (globalThis as { chrome?: unknown }).chrome;
     originalFileReader = (globalThis as { FileReader?: unknown }).FileReader;
     (globalThis as { chrome?: unknown }).chrome = {
@@ -103,7 +109,7 @@ describe('ImageVaultHost', () => {
   it('stores an uploaded image and reports it back', async () => {
     await putImage('r1', 'page-1', 'hello');
 
-    expect(vault.get('page-1')).toBeInstanceOf(Blob);
+    expect(await vault.get('page-1')).toBeInstanceOf(Blob);
     expect(port.sent).toContainEqual({ type: 'vault-stored', requestId: 'r1' });
   });
 
@@ -130,27 +136,29 @@ describe('ImageVaultHost', () => {
     expect(port.sent).toEqual([{ type: 'vault-image', requestId: 'r1', found: false }]);
   });
 
-  it('lists keys and clears the store', () => {
-    vault.put('a', new Blob(['a']));
-    vault.put('b', new Blob(['b']));
+  it('lists keys and clears the store', async () => {
+    await vault.put('a', new Blob(['a']));
+    await vault.put('b', new Blob(['b']));
 
     port.emit({ type: 'vault-list', requestId: 'r1' });
+    await flush();
     expect(port.sent.at(-1)).toEqual({ type: 'vault-keys', requestId: 'r1', keys: ['a', 'b'] });
 
     port.emit({ type: 'vault-clear', requestId: 'r2' });
+    await flush();
     expect(port.sent.at(-1)).toEqual({ type: 'vault-cleared', requestId: 'r2' });
     expect(vault.size()).toBe(0);
   });
 
-  it('applies a new entry limit and evicts down to it', () => {
-    // 默认上限在下面这个循环里就会被撑爆，所以先给一个宽裕的起点。
-    for (const key of ['a', 'b', 'c', 'd']) vault.put(key, new Blob([key]));
+  it('applies a new entry limit and evicts down to it', async () => {
+    for (const key of ['a', 'b', 'c', 'd']) await vault.put(key, new Blob([key]));
 
     port.emit({ type: 'vault-set-limit', requestId: 'r1', limit: 2 });
+    await flush();
     expect(port.sent.at(-1)).toEqual({ type: 'vault-limit-set', requestId: 'r1' });
     // 调小 = 立刻裁，而不是等下一次写入。
     expect(vault.size()).toBe(2);
-    expect(vault.listKeys()).toEqual(['c', 'd']);
+    await expect(vault.listKeys()).resolves.toEqual(['c', 'd']);
   });
 
   it('fails the request instead of throwing when the chunk stream is incomplete', async () => {
@@ -188,16 +196,18 @@ describe('ImageVaultHost', () => {
     // 通道仍然活着：正常请求照常处理。
     port.sent.length = 0;
     port.emit({ type: 'vault-list', requestId: 'r1' });
+    await flush();
     expect(port.sent).toEqual([{ type: 'vault-keys', requestId: 'r1', keys: [] }]);
   });
 
-  it('ignores malformed messages without killing the channel', () => {
+  it('ignores malformed messages without killing the channel', async () => {
     port.emit({ type: 'nonsense' });
     port.emit('字符串');
     port.emit({ type: 'vault-get', requestId: '', key: 'k' });
 
     expect(port.sent).toEqual([]);
     port.emit({ type: 'vault-list', requestId: 'r1' });
+    await flush();
     expect(port.sent).toEqual([{ type: 'vault-keys', requestId: 'r1', keys: [] }]);
   });
 
@@ -209,7 +219,9 @@ describe('ImageVaultHost', () => {
         },
       },
     };
-    const host = new ImageVaultHost(new TranslatedImageMemoryVault());
+    const host = new ImageVaultHost(
+      createTranslatedImageCache({ port: createInMemoryStoragePort().port }),
+    );
 
     expect(() => host.connect()).not.toThrow();
   });

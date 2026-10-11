@@ -24,6 +24,10 @@ import { ScreenshotController } from './screenshot/screenshotController';
 import { createDefaultReaderEngineReadingModeModule } from './reading/defaultReaderEngineReadingModeModule';
 import type { ReaderEngineReadingModeModulePort } from './reading/readerEngineReadingModeModule';
 import { createSiteReadingModeAdapter } from './reading/siteReadingModeAdapter';
+import { createProbe } from '../../shared/probe';
+
+/** 探针：只记录译图缓存的"读回"结果，不改变任何行为。定位完即删。 */
+const probe = createProbe('content');
 
 type MountedImage = {
   key: string;
@@ -99,6 +103,9 @@ export class TranslatorCore {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    // ★ 探针：内容脚本层归零的**唯一**入口。它出现在 `page:hide(persisted=false)` 之后
+    //   是设计使然（翻页/重载都归零），不代表 off-screen 那份缓存丢了。
+    probe('core:stop', { reason: 'page teardown' });
     if (this.disposeObserver) {
       this.disposeObserver();
       this.disposeObserver = null;
@@ -171,6 +178,37 @@ export class TranslatorCore {
   }
 
   /**
+   * 读 **落盘那份缓存**里现有的条数（弹窗的「译图缓存 N 张」读的就是它）。
+   *
+   * 与 `getMemoryCacheInfo().size` 的区别，是这两层的寿命不同：
+   * - `stateStore` 那层随本文档生灭 —— 刷新页面（`pagehide` → `stop()` → `dispose()`）必归零；
+   * - 落盘那层跨页面 / 跨 SW 重启存活，才是"缓存里到底留了几张"的真相。
+   *
+   * 弹窗原先显示前者的条数，于是每次刷新都会看到数字掉到 0（图其实还在），
+   * 用户误以为缓存被清空。**只读键**，不把 Blob 搬回来（一次全量读会把整库图片
+   * 塞进调用方的堆里）。
+   *
+   * ★ 2026-10-10：**返回 `reached`** —— 读不到时不能再谎报"0 张"。
+   *   真机上"宿主失联"与"缓存真的空"长得一模一样，弹窗显示 0 张把排查带偏过。
+   */
+  async getVaultCacheSize(): Promise<{ size: number; reached: boolean }> {
+    try {
+      const result = await this.vault.loadKeys();
+      if (result.status === 'unavailable') {
+        probe('vault:size-unavailable', { reason: result.reason });
+        return { size: 0, reached: false };
+      }
+      return { size: result.value.length, reached: true };
+    } catch (error) {
+      // 注入的替身不一定守"不抛"的约定：照样不能谎报数字。
+      probe('vault:size-unavailable', {
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      return { size: 0, reached: false };
+    }
+  }
+
+  /**
    * 改译图缓存的条数上限。**两层一起改**。
    *
    * 缓存分两层：本文档的 `stateStore` 与 off-screen 文档的 `vault`。用户改上限这件事
@@ -212,6 +250,8 @@ export class TranslatorCore {
    */
   clearMemoryCache(): { size: number; limit: number; cleared: number } {
     const cleared = this.stateStore.clear();
+    // ★ 探针：这条路径就是"用户主动点清空"的唯一入口。日志里出现它 = 不是 bug。
+    probe('cache:clear-memory', { cleared });
     // 持久层必须一起清 —— 只清内存的话，重载一次被"清掉"的译图又从那边的缓存里回来了，
     // 用户看到的就是「清空按钮没用」。待回填队列同理。
     this.pendingVaultKeys.clear();
@@ -347,9 +387,19 @@ export class TranslatorCore {
   private async persistVaultEntry(key: string, image: Blob): Promise<void> {
     // 内存里已经有这张图了，不必再等缓存里的那份回填。
     this.pendingVaultKeys.delete(key);
+    const t0 = probe.mark();
     try {
-      await this.vault.put(key, image);
-    } catch {
+      const result = await this.vault.put(key, image);
+      if (result.status === 'unavailable') {
+        probe.timed('vault:put-unavailable', t0, { key, reason: result.reason });
+        return;
+      }
+      probe.timed('vault:put-ok', t0, { key, bytes: image.size });
+    } catch (error) {
+      probe.timed('vault:put-failed', t0, {
+        key,
+        error: error instanceof Error ? error.message : String(error),
+      });
       // vault 内部已兜底；这里是双保险（注入的替身不一定守约定）。
     }
   }
@@ -361,12 +411,24 @@ export class TranslatorCore {
    * 所以真正的图一律推迟到该页被挂载时按需取（见 `materializeVaultedImage`）。
    */
   private async hydrateVault(): Promise<void> {
+    const t0 = probe.mark();
     let keys: string[];
     try {
-      keys = await this.vault.loadKeys();
-    } catch {
+      const result = await this.vault.loadKeys();
+      // ★ 这里就是"看着像被清空、其实数据还在"的分叉点：
+      //   不可达（宿主没起来 / 端口断了 / 超时）与"真的 0 个键"必须分开记。
+      if (result.status === 'unavailable') {
+        probe.timed('vault:hydrate-unavailable', t0, { reason: result.reason });
+        return;
+      }
+      keys = result.value;
+    } catch (error) {
+      probe.timed('vault:hydrate-failed', t0, {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return;
     }
+    probe.timed('vault:hydrate-ok', t0, { count: keys.length });
     if (this.stopped || keys.length === 0) return;
     for (const key of keys) this.pendingVaultKeys.add(key);
     // 读回完成时 DOM 早就稳定、适配器观察器不会再触发 —— 主动补一拍。
@@ -385,14 +447,31 @@ export class TranslatorCore {
   }
 
   private async materializeVaultedImage(key: string, state: PhotoState): Promise<void> {
+    const t0 = probe.mark();
     let blob: Blob | undefined;
     try {
-      blob = await this.vault.get(key);
-    } catch {
+      const result = await this.vault.get(key);
+      if (result.status === 'unavailable') {
+        // 通道不可达 ≠ 缓存里没有 —— 分开记，否则命中率问题会被读成"缓存是空的"。
+        probe.timed('vault:materialize-unavailable', t0, { key, reason: result.reason });
+        return;
+      }
+      blob = result.value;
+    } catch (error) {
+      probe.timed('vault:materialize-failed', t0, {
+        key,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return;
     }
+    if (!blob) {
+      // ★ 探针：这一页**被记账为"缓存里有"，真去取却没有** —— 命中率问题的直接证据。
+      probe.timed('vault:materialize-miss', t0, { key });
+      return;
+    }
+    probe.timed('vault:materialize-ok', t0, { key, bytes: blob.size });
     // 取图是异步的，这中间世界可能已经变了：文档被停掉 / 用户自己点了翻译 / 已经有图了。
-    if (!blob || this.stopped || state.translatedUrl || state.status === 'running') return;
+    if (this.stopped || state.translatedUrl || state.status === 'running') return;
     // 这条 state 可能已被内存层淘汰（改小上限 / 写入挤掉）——
     // 往一个不在 store 里的对象上写图 = 页面贴了图、状态卡片却是空的。
     if (this.stateStore.get(key) !== state) return;

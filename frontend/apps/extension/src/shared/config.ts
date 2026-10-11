@@ -196,13 +196,15 @@ export type ExtensionSettings = {
 /**
  * 译图缓存条数上限的默认值 / 取值范围。
  *
- * 译图缓存有**两层**，两层都直接 import 这个常量当各自的默认上限：
+ * 译图缓存有**两层**，两层的默认上限都以这个常量为准：
  * - `content/core/state/photoStateStore.ts`（内容脚本内存，随页面生灭）
- * - `offscreen/translatedImageMemoryVault.ts`（off-screen 文档内存，跨页面重载存活）
+ * - `offscreen/translatedImageCacheStore.ts`（**落盘 IndexedDB**，跨 SW 重启/浏览器重启存活）
  *
  * 所以默认值**只有这一处**，不存在"改一层、另一层没跟"。
  * 运行时改上限同理：`TranslatorCore.setMemoryCacheLimit()` 由内存层定出生效值，
  * 再原样交给另一层，两层不会各算各的。
+ * 落盘那一层另有字节闸 `TRANSLATED_IMAGE_MAX_BYTES`（条数上限最大 1000，按每页 ~1.6MB
+ * 就是 1.6GB，光靠条数管不住磁盘占用）。
  */
 export const defaultTranslationCacheLimit = 15;
 export const minTranslationCacheLimit = 1;
@@ -222,6 +224,8 @@ export function normalizeTranslationCacheLimit(value: unknown): number {
 export const defaultPrefetchDepth = 4;
 export const minPrefetchDepth = 0;
 export const maxPrefetchDepth = 10;
+
+
 
 /** 把任意输入钳成合法预载页数：非整数 → 默认，越界 → 贴边界。0 = 关闭预载。 */
 export function normalizePrefetchDepth(value: unknown): number {

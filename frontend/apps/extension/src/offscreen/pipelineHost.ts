@@ -115,8 +115,9 @@ export type PipelineHostDependencies = {
   /**
    * 空闲时**是否必须留着这个文档**。
    *
-   * 译图缓存（`TranslatedImageMemoryVault`）活在本文档的 JS 堆里，文档一关缓存就整体消失。
-   * 所以缓存非空时宿主**只释放模型/Worker，不请求关闭文档**；缓存空了下一个空闲周期自然放行。
+   * ★ 2026-10-10 起：译图缓存已落到 **IndexedDB**（`translatedImageCacheStore`），
+   * 文档关掉也不会丢数据 —— 这条闸门因此不再是"保缓存"的正确性依赖，
+   * 只用来减少文档重建（少一次 ONNX 冷启动）。缓存非空时仍不放行关闭。
    * 不传 = 恒定 false = 与加这条闸门之前的行为完全一致。
    */
   keepAliveWhenIdle?: () => boolean;
@@ -816,6 +817,18 @@ export class PipelineHost {  private port: ExtensionPort | null = null;
         what: {
           stage: failureStage,
           cancelled: job.abortController.signal.aborted === true,
+          // ★ 归因（2026-10-10）：取消原因原来只活在内存里，事件流里只剩一个
+          //   `pipeline.cancelled.userRequested` —— 于是「用户点了终止翻译」与
+          //   「页面被销毁 → 翻译核心停止 → 任务被取消」在日志里**长得一模一样**，
+          //   而后者正是"无操作时任务/缓存被清掉"这类问题的指纹，无法计数就无法定位。
+          //   现在把原因一并落盘：`cancelSummary` 是原文（如"图片翻译控制器已停止"），
+          //   `cancelCode` 是分类（user-requested / transport-disconnected / ...）。
+          ...(job.cancellationReason
+            ? {
+                cancelCode: job.cancellationReason.code,
+                cancelSummary: job.cancellationReason.diagnosticSummary,
+              }
+            : {}),
           // 设计 §7：出错前走过的阶段也要带走 —— 失败时 orchestrator 的局部 stageTimings
           // 随异常丢失，这里这份实时轨迹是唯一还原（含出错那一站的耗时）。
           stages: failed.stages,

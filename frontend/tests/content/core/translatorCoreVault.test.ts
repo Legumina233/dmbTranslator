@@ -51,11 +51,11 @@ const pageUrl = 'https://example.com/123456-7.png';
 
 function emptyVault(overrides: Partial<TranslatedImageVaultPort> = {}): TranslatedImageVaultPort {
   return {
-    loadKeys: async () => [],
-    get: async () => undefined,
-    put: async () => undefined,
-    setLimit: async () => undefined,
-    clear: async () => undefined,
+    loadKeys: async () => ({ status: 'ok', value: [] }),
+    get: async () => ({ status: 'ok', value: undefined }),
+    put: async () => ({ status: 'ok', value: undefined }),
+    setLimit: async () => ({ status: 'ok', value: undefined }),
+    clear: async () => ({ status: 'ok', value: undefined }),
     ...overrides,
   };
 }
@@ -109,8 +109,8 @@ describe('TranslatorCore translated image vault', () => {
   it('restores a translated image from the vault when the page is mounted again', async () => {
     const blob = new Blob(['translated'], { type: 'image/png' });
     const harness = createHarness(emptyVault({
-      loadKeys: async () => [pageKey],
-      get: async () => blob,
+      loadKeys: async () => ({ status: 'ok', value: [pageKey] }),
+      get: async () => ({ status: 'ok', value: blob }),
     }));
 
     await harness.hydrate();
@@ -128,8 +128,11 @@ describe('TranslatorCore translated image vault', () => {
   });
 
   it('reads only the keys while hydrating, never the images', async () => {
-    const get = vi.fn(async () => undefined);
-    const harness = createHarness(emptyVault({ loadKeys: async () => [pageKey], get }));
+    const get = vi.fn(async () => ({ status: 'ok' as const, value: undefined }));
+    const harness = createHarness(emptyVault({
+      loadKeys: async () => ({ status: 'ok', value: [pageKey] }),
+      get,
+    }));
 
     await harness.hydrate();
 
@@ -141,8 +144,8 @@ describe('TranslatorCore translated image vault', () => {
   it('keeps the image the current document has already translated', async () => {
     const blob = new Blob(['stale'], { type: 'image/png' });
     const harness = createHarness(emptyVault({
-      loadKeys: async () => [pageKey],
-      get: async () => blob,
+      loadKeys: async () => ({ status: 'ok', value: [pageKey] }),
+      get: async () => ({ status: 'ok', value: blob }),
     }));
     await harness.hydrate();
 
@@ -172,8 +175,8 @@ describe('TranslatorCore translated image vault', () => {
   it('does not restore anything once the document has been stopped', async () => {
     const blob = new Blob(['translated'], { type: 'image/png' });
     const harness = createHarness(emptyVault({
-      loadKeys: async () => [pageKey],
-      get: async () => blob,
+      loadKeys: async () => ({ status: 'ok', value: [pageKey] }),
+      get: async () => ({ status: 'ok', value: blob }),
     }));
     Reflect.set(harness.core, 'stopped', true);
 
@@ -186,7 +189,7 @@ describe('TranslatorCore translated image vault', () => {
   });
 
   it('persists a freshly translated image through the controller', async () => {
-    const put = vi.fn(async () => undefined);
+    const put = vi.fn(async () => ({ status: 'ok' as const, value: undefined }));
     const harness = createHarness(emptyVault({ put }));
     const controller = Reflect.get(
       harness.core,
@@ -203,7 +206,7 @@ describe('TranslatorCore translated image vault', () => {
   });
 
   it('clears the vault together with the memory cache', () => {
-    const clear = vi.fn(async () => undefined);
+    const clear = vi.fn(async () => ({ status: 'ok' as const, value: undefined }));
     const harness = createHarness(emptyVault({ clear }));
 
     harness.core.clearMemoryCache();
@@ -214,7 +217,7 @@ describe('TranslatorCore translated image vault', () => {
   });
 
   it('pushes a limit change into the vault as well as the memory store', () => {
-    const setLimit = vi.fn(async () => undefined);
+    const setLimit = vi.fn(async () => ({ status: 'ok' as const, value: undefined }));
     const harness = createHarness(emptyVault({ setLimit }));
 
     harness.core.setMemoryCacheLimit(7);
@@ -227,7 +230,7 @@ describe('TranslatorCore translated image vault', () => {
   });
 
   it('hands the vault the value the memory store actually settled on', () => {
-    const setLimit = vi.fn(async () => undefined);
+    const setLimit = vi.fn(async () => ({ status: 'ok' as const, value: undefined }));
     const harness = createHarness(emptyVault({ setLimit }));
 
     // 0 是非法上限 → 内存层回落到默认。vault 必须拿到**同一个**回落值，两层不各算各的。
@@ -235,6 +238,43 @@ describe('TranslatorCore translated image vault', () => {
 
     expect(harness.stateStore.limit()).toBe(defaultTranslationCacheLimit);
     expect(setLimit).toHaveBeenCalledWith(defaultTranslationCacheLimit);
+    harness.core.stop();
+  });
+
+  it('reports the cache size as reached when the vault answered', async () => {
+    const harness = createHarness(emptyVault({
+      loadKeys: async () => ({ status: 'ok', value: [pageKey, 'x-1'] }),
+    }));
+
+    await expect(harness.core.getVaultCacheSize()).resolves.toEqual({ size: 2, reached: true });
+    harness.core.stop();
+  });
+
+  it('reports an unreachable vault as not reached instead of "0 images"', async () => {
+    // ★ 这条钉住的是"失败不许伪装成空"：弹窗靠 `reached=false` 显示「未连接」，
+    //   而不是谎报"0 张"（真机上宿主失联与缓存真空长得一模一样，曾把排查带偏）。
+    const harness = createHarness(emptyVault({
+      loadKeys: async () => ({ status: 'unavailable', reason: '译图缓存宿主不可用' }),
+    }));
+
+    await expect(harness.core.getVaultCacheSize()).resolves.toEqual({ size: 0, reached: false });
+    harness.core.stop();
+  });
+
+  it('mounts the page normally when the vault is unreachable', async () => {
+    const get = vi.fn(async () => ({ status: 'ok' as const, value: undefined }));
+    const harness = createHarness(emptyVault({
+      loadKeys: async () => ({ status: 'unavailable', reason: '宿主不可用' }),
+      get,
+    }));
+
+    await harness.hydrate();
+    harness.sync();
+    await flushAsync();
+
+    // 不可达时**不能**把任何键记成"待回填"，更不能去取图 —— 那会把"读不到"变成一连串无谓的往返。
+    expect(get).not.toHaveBeenCalled();
+    expect(harness.stateStore.get(pageKey)?.status).toBe('idle');
     harness.core.stop();
   });
 });
