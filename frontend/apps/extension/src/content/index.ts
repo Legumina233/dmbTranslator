@@ -88,9 +88,14 @@ function srcTail(url: string): string {
   }
 }
 
-// --- 意图即换图（2026-10-04）：点击/方向键的瞬间，目标页就写在 anchor href / ±1 里，
-// 译图已在内存 → 画框立即换，不等站点 api.php 往返（实测省 ~0.5-1s）。
-// 导航意图与结果不符时，下一次 sync 会用当前页状态自我纠正（画框常驻，无需回滚）。
+// --- 贴图**以站点为准**（毛病 A · 2026-10-11 用户拍板）------------------------------
+// 这里以前是"意图即换图"：按键/点击的**瞬间**就按 ±1 预测下一页，并把那一页的译图浮上去
+// （省 ~0.5-1s）。但站点**不一定接受**那次翻页 —— 实测快速连点第二下是 `accepted=False`，
+// 于是屏幕上先出现"站点没去的那一页"的译图；等站点原图加载完（+1.1~2.4s），同步逻辑又按
+// **真实页**贴回 → 用户看到的"跳回上一页"。
+// 现在改为：**只贴站点已经翻到的那一页**（在下面预取块的"网址变化"回调里贴）。
+// 代价（已与用户确认）：译图出现从"瞬间"变成"最多晚约 0.5 秒"（网址变化实测 +4~517ms，
+// 而原图要 +1~4 秒，所以"译图先于原图"这个能力**保留**）。
 if (adapter === ehentaiAdapter) {
   // ★ 临时测量：把"画框入口"包一层，记录每一次现身/隐身（谁、在哪个网址页码下、贴了哪一页）。
   //   只是转发，不改行为；万一包不上（被冻结等）就自动跳过，测量降级但功能不受影响。
@@ -105,11 +110,12 @@ if (adapter === ehentaiAdapter) {
       return originalApplyOverlay(target, url);
     };
   }
-  const intentShow = (page: number, kind: 'keyboard' | 'click'): void => {
+  // ★ 临时测量：只**记录**"用户想翻到哪一页"，**不贴图**（贴图改由下面的"以站点为准"负责）。
+  //   它给 `page:action` / `page:path` / `page:onload` 提供时间起点，用来验证毛病 A 的效果。
+  function recordPageAction(page: number, kind: 'keyboard' | 'click'): void {
     const identity = parseEhentaiPageIdentity(location.pathname);
     if (!identity) return;
     const img = document.getElementById('img') as HTMLImageElement | null;
-    // ★ 临时测量：动作本身 + 目标页译图在不在手 + 站点那张图此刻是什么。**不改变下面的任何判断。**
     const at = probe.mark();
     const cached = core.getTranslatedUrl(`${identity.gid}-${page}`) !== null;
     lastPageAction = {
@@ -128,20 +134,12 @@ if (adapter === ehentaiAdapter) {
       cached,
       src: srcTail(lastPageAction.elementSrc),
     });
-    if (!core.isDisplayModeTranslated()) return; // 全局原图模式：画框不抢戏
-    const url = core.getTranslatedUrl(`${identity.gid}-${page}`);
-    if (!url) return;
-    if (!img) return;
-    adapter.applyOverlayImage?.(
-      { element: img, key: `${identity.gid}-${identity.page}`, originalUrl: img.currentSrc || img.src },
-      url,
-    );
-  };
+  }
   window.addEventListener('keydown', (ev) => {
     const identity = parseEhentaiPageIdentity(location.pathname);
     if (!identity) return;
-    if (ev.key === 'ArrowRight') intentShow(identity.page + 1, 'keyboard');
-    else if (ev.key === 'ArrowLeft') intentShow(identity.page - 1, 'keyboard');
+    if (ev.key === 'ArrowRight') recordPageAction(identity.page + 1, 'keyboard');
+    else if (ev.key === 'ArrowLeft') recordPageAction(identity.page - 1, 'keyboard');
   }, true);
   window.addEventListener('click', (ev) => {
     if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
@@ -150,7 +148,7 @@ if (adapter === ehentaiAdapter) {
     if (!href) return;
     try {
       const m = /^\/s\/[0-9a-f]+\/(\d+)-(\d+)(?:[?#/]|$)/i.exec(new URL(href, location.href).pathname);
-      if (m) intentShow(Number(m[2]), 'click');
+      if (m) recordPageAction(Number(m[2]), 'click');
     } catch { /* 非法 href 忽略 */ }
   }, true);
 }
@@ -499,6 +497,28 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
     probeSrcObserver.observe(element, { attributes: true, attributeFilter: ['src'] });
   }
 
+  /**
+   * ★ 毛病 A：**只贴站点已经翻到的那一页**的译图。
+   *
+   * 它取代了原来的"意图即换图（预测 ±1）"：预测会在站点**没接受**那次翻页时贴出
+   * "站点没去的那一页"，随后被同步逻辑按真实页贴回 → 跳回。
+   * 这里由"网址变化"驱动（实测站点接受翻页后 +4~517ms 改网址，而原图要 +1~4s 才加载完），
+   * 所以既不再跳回，又保留了"译图先于原图出现"。
+   */
+  function showCurrentPageTranslation(identity: { gid: number; page: number }): void {
+    if (!core.isDisplayModeTranslated()) return; // 全局原图模式：画框不抢戏
+    const pageKey = `${identity.gid}-${identity.page}`;
+    const url = core.getTranslatedUrl(pageKey);
+    if (!url) return; // 这一页的译图还不在**内存**里（落盘层的要等挂载时物化，那条路自己会贴）
+    const img = document.getElementById('img') as HTMLImageElement | null;
+    if (!img) return;
+    probe('page:overlay-site', { pageKey });
+    adapter.applyOverlayImage?.(
+      { element: img, key: pageKey, originalUrl: img.currentSrc || img.src },
+      url,
+    );
+  }
+
   let lastPathname = '';
   const onMaybeNavigated = (): void => {
     if (location.pathname === lastPathname) return;
@@ -518,6 +538,8 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
     executor.onPageArrived(identity); // 窗口平移：近页排上、出窗的离队
     chain.onPageArrived(identity, extractImgkeyFromPathname(location.pathname));
     probeObserveImage();
+    // ★ 毛病 A：贴图**以站点为准** —— 网址已经变到这一页，才贴这一页的译图。
+    showCurrentPageTranslation(identity);
     publishTelemetry();
   };
 
