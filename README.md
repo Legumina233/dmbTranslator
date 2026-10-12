@@ -52,8 +52,14 @@ scripts\test_ocr.cmd             :: OCR 冒烟测试
 ```
 
 - `.venv` 会建在**仓库根**（独立环境，不污染系统 Python）；装完直接用上面这些脚本，不用自己另建。
-- 无人值守：`DMB_PYTHON` / `DMB_TORCH=cpu|cu124` / `DMB_SKIP_FRONTEND=1` / `DMB_HF_MIRROR_ENDPOINT`。
+- 无人值守 / 换源：`DMB_PYTHON` · `DMB_TORCH=cpu|cu124` · `DMB_SKIP_FRONTEND=1` · `DMB_HF_MIRROR_ENDPOINT`（权重，默认 hf-mirror）· **`DMB_PIP_MIRROR`**（pip 依赖，默认清华；想走官方就设 `https://pypi.org/simple`）。
 - 两个服务互不依赖：关掉 OCR/翻译照样能管模型；停 ollama 会先卸掉全部驻留模型再停引擎。
+> **GPU 版 torch 下载卡住怎么办**（真机遇到过：官方源无声挂死）
+> 手动下载 → 丢进 `%LOCALAPPDATA%\dmbTranslator\tools\`（或 `E:\AI\tools\`、下载文件夹），再重跑 `setup.cmd`，脚本会**自动优先用本地 wheel**：
+> - 地址：<https://mirrors.aliyun.com/pytorch-wheels/cu124/>（国内镜像）
+> - 文件名：`torch-2.6.0+cu124-cp311-cp311-win_amd64.whl`（约 2.4 GB）
+> - 必须匹配：Python **3.11** → `cp311`；64 位 Windows → `win_amd64`；**不要** `+cpu`（那是纯 CPU 版）
+> - 也可以什么都不做：`setup.cmd` 会自己用 `curl` 从上面那个镜像下载（带进度、可重试）
 
 ### 3. 获取模型（本机路线）
 

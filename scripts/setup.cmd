@@ -14,6 +14,8 @@ REM    DMB_PYTHON               指定用来建 venv 的 python.exe
 REM    DMB_TORCH=cpu|cu124      跳过交互，直接指定 torch 版本
 REM    DMB_SKIP_FRONTEND=1      跳过第 5 步（前端依赖）
 REM    DMB_HF_MIRROR_ENDPOINT   权重下载镜像，默认 https://hf-mirror.com
+REM    DMB_PIP_MIRROR            pip 镜像，默认清华；想走官方就设 https://pypi.org/simple
+if not defined DMB_PIP_MIRROR set "DMB_PIP_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple"
 REM
 REM  [编码] 本文件存为 GBK(cp936)，第 2 行的 chcp 也固定 936 —— 不要改成 UTF-8/65001：
 REM    cmd.exe 解析批处理时按 OEM 代码页（中文 Windows = 936）读字节。文件编码与它不一致时，
@@ -35,6 +37,7 @@ echo   [1/5] 建虚拟环境   [2/5] 装 torch   [3/5] 装其余依赖
 echo   [4/5] 下模型权重   [5/5] 前端依赖（可选）
 echo.
 
+call :ensure_python || goto :fail
 call :step_python   || goto :fail
 call :step_torch    || goto :fail
 call :step_deps     || goto :fail
@@ -43,9 +46,101 @@ call :step_frontend
 goto :summary
 
 REM ── 1/5 建虚拟环境 ────────────────────────────────────────────────────
+REM ── [0/5] 保证有一个"能用的" Python（没有就自动获取便携版） ──────────────
+:torch_local
+REM ★ 已经就绪就**什么都不做**：本地 wheel 离线重装虽然不用下载，但也要白等好几分钟。
+REM   判定：DMB_TORCH=cpu 时只要能 import；否则要求 import 成功且 CUDA 可用（这样"CPU 版 → GPU 版"仍然会被纠正）。
+if /I "%DMB_TORCH%"=="cpu" (
+  "%PY%" -c "import torch" >nul 2>nul && ( echo         torch 已就绪，跳过。 & exit /b 0 )
+) else (
+  "%PY%" -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)" >nul 2>nul && ( echo         torch 已就绪（CUDA 可用），跳过。 & exit /b 0 )
+)
+REM 优先本地 wheel / 国内镜像安装 torch。官方 download.pytorch.org 在部分网络下会无声挂死
+REM （真机卡过 33 分钟 / 16 分钟：CPU 0%、缓存零增长）。返回 0 = 已装好，调用方直接 goto :eof。
+if /I "%DMB_TORCH%"=="cpu" exit /b 1
+if not defined DMB_TOOLS set "DMB_TOOLS=%LOCALAPPDATA%\dmbTranslator\tools"
+for /f "delims=" %%W in ('dir /b /a-d "%DMB_TOOLS%\torch-*.whl" 2^>nul') do (
+  echo         找到本地 wheel：%%W
+  "%PY%" -m pip install --force-reinstall --no-deps --no-index "%DMB_TOOLS%\%%W" && exit /b 0
+)
+for /f "delims=" %%W in ('dir /b /a-d "E:\AI\tools\torch-*.whl" 2^>nul') do (
+  echo         找到本地 wheel：%%W
+  "%PY%" -m pip install --force-reinstall --no-deps --no-index "E:\AI\tools\%%W" && exit /b 0
+)
+for /f "delims=" %%W in ('dir /b /a-d "%USERPROFILE%\Downloads\torch-*.whl" 2^>nul') do (
+  echo         找到本地 wheel：%%W
+  "%PY%" -m pip install --force-reinstall --no-deps --no-index "%USERPROFILE%\Downloads\%%W" && exit /b 0
+)
+if 1==0 (
+  if exist %%W (
+    echo         找到本地 wheel：%%~nxW
+    "%PY%" -m pip install --force-reinstall --no-deps --no-index "%%~fW" && exit /b 0
+  )
+)
+REM ② 本地没有 → 用 curl 自己下载（带进度、可重试；比让 pip 静默下载可靠）
+set "DMB_WHL=%DMB_TOOLS%\torch-2.6.0+cu124-cp311-cp311-win_amd64.whl"
+if not exist "%DMB_WHL%" (
+  echo         本地没有 wheel，用 curl 下载（约 2.4 GB，可见进度）...
+  echo         来源：https://mirrors.aliyun.com/pytorch-wheels/cu124/
+  curl.exe -L --fail --retry 3 --connect-timeout 20 -o "%DMB_WHL%.part" "https://mirrors.aliyun.com/pytorch-wheels/cu124/torch-2.6.0%%2Bcu124-cp311-cp311-win_amd64.whl"
+  if exist "%DMB_WHL%.part" move /y "%DMB_WHL%.part" "%DMB_WHL%" >nul
+)
+if exist "%DMB_WHL%" (
+  echo         装本地 wheel：%DMB_WHL%
+  "%PY%" -m pip install --force-reinstall --no-deps --no-index "%DMB_WHL%" && exit /b 0
+)
+echo         本地没有 wheel，改试国内 pytorch 轮子镜像...
+"%PY%" -m pip install torch --force-reinstall --no-deps --no-index -f https://mirrors.aliyun.com/pytorch-wheels/cu124/ --timeout 60 --retries 10 && exit /b 0
+exit /b 1
+
+:ensure_python
+if defined BASE call :try_python "%BASE%" && goto :eof
+set "DMB_TOOLS=%LOCALAPPDATA%\dmbTranslator\tools"
+if exist "%DMB_TOOLS%\python311\python.exe" call :try_python "%DMB_TOOLS%\python311\python.exe" && goto :eof
+for /f "delims=" %%P in ('where python 2^>nul') do call :try_python "%%P" && goto :eof
+py -3.11 -c "import sys, venv" >nul 2>nul && set "BASE=py" && goto :eof
+echo.
+echo [0/5] 本机没有可用的 Python，将自动下载官方 Python 3.11
+echo        位置：%DMB_TOOLS%\python311   （仅当前用户，不改系统 PATH）
+set "DMB_PYEXE=%TEMP%\dmb-python-3.11.9-amd64.exe"
+if not exist "%DMB_PYEXE%" powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '%DMB_PYEXE%' -UseBasicParsing } catch { exit 1 }"
+if not exist "%DMB_PYEXE%" (
+  echo [FAIL] 自动下载失败。请手动安装 Python 3.11：https://www.python.org/downloads/
+  echo        安装时选 "Install for me only"；或用 DMB_PYTHON 指向已有的 python.exe。
+  exit /b 1
+)
+echo        正在静默安装（约 1 分钟）...
+"%DMB_PYEXE%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 TargetDir="%DMB_TOOLS%\python311"
+if not exist "%DMB_TOOLS%\python311\python.exe" (
+  echo [FAIL] 安装未完成：%DMB_TOOLS%\python311\python.exe 不存在
+  exit /b 1
+)
+call :try_python "%DMB_TOOLS%\python311\python.exe" || exit /b 1
+echo        已就绪：%BASE%
+exit /b 0
+
+:try_python
+REM %1 = 候选（完整路径或命令名）。必须真能跑（import sys, venv）才采用；
+REM      并排除 Windows 商店的占位 stub（...\WindowsApps\python.exe），它是假的。
+set "DMB_CAND=%~1"
+if "%DMB_CAND%"=="" exit /b 1
+echo %DMB_CAND% | findstr /I "WindowsApps" >nul && exit /b 1
+%DMB_CAND% -c "import sys, venv" >nul 2>nul || exit /b 1
+set "BASE=%DMB_CAND%"
+exit /b 0
+
 :step_python
-set BASE=
-if defined DMB_PYTHON if exist "%DMB_PYTHON%" set BASE=%DMB_PYTHON%
+REM ★ 先验证已有的 .venv 是否**真的能用**：底座被删/换了别的解释器时，它会变成一个空壳
+REM   （真机现象：pyvenv.cfg 指向已不存在的旧 conda，%PY% 跑起来只报 No Python at ...）
+if exist "%VENV%\Scripts\python.exe" (
+  "%VENV%\Scripts\python.exe" -c "import sys" >nul 2>nul
+  if errorlevel 1 (
+    echo         .venv 已损坏（底座不在了）-^> 删除后重建
+    rmdir /s /q "%VENV%" 2>nul
+  )
+)
+if not defined BASE set BASE=
+if not defined BASE if defined DMB_PYTHON if exist "%DMB_PYTHON%" set BASE=%DMB_PYTHON%
 if not defined BASE where py >nul 2>nul && set BASE=py
 if not defined BASE where python >nul 2>nul && set BASE=python
 if not defined BASE (
@@ -59,9 +154,13 @@ if exist "%PY%" (
 )
 echo [1/5] 创建虚拟环境...
 if "%BASE%"=="py" (
-  py -3.11 -m venv "%VENV%" 2>nul || py -m venv "%VENV%"
+  REM 只用 :ensure_python 选定的解释器建 venv（不再优先 py，避免和它不一致）
 ) else (
-  "%BASE%" -m venv "%VENV%"
+  if exist "%VENV%\pyvenv.cfg" findstr /I /C:"%BASE%" "%VENV%\pyvenv.cfg" >nul || (
+  echo         .venv 的底座不是当前解释器 -^> 删除后重建
+  rmdir /s /q "%VENV%" 2>nul
+)
+"%BASE%" -m venv "%VENV%"
 )
 if not exist "%PY%" (
   echo [1/5] [FAIL] 虚拟环境创建失败。请确认 Python 3.11 可用：python --version
@@ -71,6 +170,8 @@ exit /b 0
 
 REM ── 2/5 torch ────────────────────────────────────────────────────────
 :step_torch
+call :torch_local
+if not errorlevel 1 goto :eof
 set TORCH_KIND=
 if defined DMB_TORCH set TORCH_KIND=%DMB_TORCH%
 if not defined TORCH_KIND if exist "%VENV%\.gpu" (
@@ -86,11 +187,11 @@ if not defined TORCH_KIND (
 )
 if /i "%TORCH_KIND%"=="cpu" (
   echo         -^> 安装 CPU 版 torch
-  "%PY%" -m pip install --upgrade pip
+  "%PY%" -m pip install --upgrade pip -i "%DMB_PIP_MIRROR%" --timeout 60 --retries 10
   "%PY%" -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 ) else (
   echo         -^> 安装 CUDA 版 torch（%TORCH_KIND%）
-  "%PY%" -m pip install --upgrade pip
+  "%PY%" -m pip install --upgrade pip -i "%DMB_PIP_MIRROR%" --timeout 60 --retries 10
   "%PY%" -m pip install torch --index-url https://download.pytorch.org/whl/%TORCH_KIND%
   echo gpu> "%VENV%\.gpu"
 )
@@ -103,9 +204,9 @@ exit /b 0
 REM ── 3/5 其余 OCR 依赖 ────────────────────────────────────────────────
 :step_deps
 echo [3/5] 安装其余依赖（transformers / Pillow / jaconv / loguru）...
-"%PY%" -m pip install --upgrade pip
+"%PY%" -m pip install --upgrade pip -i "%DMB_PIP_MIRROR%" --timeout 60 --retries 10
 REM 不加 --no-deps：requirements 里的 torch>=2.0 已被第 2 步装好的版本满足（pip 不会降级成 CPU 版）；加了反而会漏掉 transformers 的 tokenizers / safetensors 等传递依赖。
-"%PY%" -m pip install -r "%LOCAL%\requirements.txt"
+"%PY%" -m pip install -r "%LOCAL%\requirements.txt" -i "%DMB_PIP_MIRROR%" --timeout 60 --retries 10
 if errorlevel 1 (
   echo [3/5] [FAIL] 依赖安装失败，检查网络后重跑本脚本。
   exit /b 1
