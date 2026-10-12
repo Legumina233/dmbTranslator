@@ -140,11 +140,13 @@ if defined DMB_SKIP_FRONTEND (
 set NPM_FOUND=
 where npm >nul 2>nul && set NPM_FOUND=1
 if not defined NPM_FOUND (
-  echo [5/5] 未检测到 npm，跳过前端依赖。
-  echo        要用扩展本身，需先装 Node 24，再手动执行下面两条：
-  echo          cd frontend
-  echo          npm install
-  exit /b 0
+    echo [5/5] 未检测到 npm，跳过前端依赖（注意：本机服务不需要 Node）。
+    echo        只有"从源码自己构建扩展"才需要 Node 24；若你用已构建好的扩展包，
+    echo        解压后在 chrome://extensions 加载即可，与本步骤无关。
+    echo        想从源码构建时再执行：
+    echo          cd frontend
+    echo          npm install
+    echo          npm run build:extension:chromium
 )
 set NODEVER=
 for /f "delims=" %%v in ('node --version 2^>nul') do set NODEVER=%%v
@@ -165,6 +167,16 @@ if errorlevel 1 (
   echo        若报 EBUSY —— 那是受限沙箱下的已知问题，改用：npm install --ignore-scripts
 ) else (
   echo        -^> 前端依赖就绪。
+
+    echo        -^> 构建扩展（chromium）...
+    call npm run build:extension:chromium
+    if errorlevel 1 (
+      echo [5/5] [WARN] 扩展构建失败。不影响本机服务，可稍后手动重跑：
+      echo          cd frontend ^&^& npm install ^&^& npm run build:extension:chromium
+    ) else (
+      echo        -^> 扩展已构建：frontend\apps\extension\dist-chromium
+      echo            到 chrome://extensions 打开"开发者模式"，用"加载已解压的扩展程序"选这个目录
+    )
 )
 popd
 exit /b 0
