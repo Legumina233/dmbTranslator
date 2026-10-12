@@ -37,8 +37,28 @@ DEFAULT_SERVER_PORT = 11436
 OLLAMA_PORT = 11434
 OLLAMA_SERVICE_PORT = 11437
 
-# V1 的 serv_ollama.cmd 里写死的模型目录；沿用它，否则 Ollama 会去默认位置找模型
-OLLAMA_MODELS_DIR = r"E:\AI\Ollama\OllamaModels"
+def _resolve_ollama_models_dir():
+    """Ollama 模型目录 —— **不写死机器路径**。
+
+    顺序：Ollama 自己的 `OLLAMA_MODELS` 环境变量 → 本仓库作者机器的历史位置
+    （**仅在真实存在时**才用；换台机器不会命中，因此不影响别人）→ 默认位置
+    `%USERPROFILE%\\.ollama\\models`。
+
+    ★ 2026-10-12 修：原来直接写死 `E:\\AI\\Ollama\\OllamaModels` —— 别人克隆下来
+      模型列表必然是空的（并且服务会去一个不存在的目录找模型）。
+    """
+    env = os.environ.get("OLLAMA_MODELS")
+    if env:
+        return env
+    legacy = r"E:\AI\Ollama\OllamaModels"
+    if os.path.isdir(legacy):
+        return legacy
+    home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    return os.path.join(home, ".ollama", "models")
+
+
+# 启动 ollama 引擎时注入给它的 `OLLAMA_MODELS`（见 start_ollama）。
+OLLAMA_MODELS_DIR = _resolve_ollama_models_dir()
 
 _DEBUG = os.environ.get("DMB_SERVICE_DEBUG") == "1"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -179,12 +199,25 @@ def stop_server(port=DEFAULT_SERVER_PORT):
 # ── Ollama ──────────────────────────────────────────────────
 
 def find_ollama_launcher():
-    """返回 (启动命令, 工作目录)。只用 CLI 版 `ollama.exe serve` —— 托盘版带界面。"""
+    """返回 (启动命令, 工作目录)。**只用 CLI 版 `ollama.exe serve`** —— 托盘版带界面且会开机自启。
+
+    ★ 2026-10-12 两处真机修正：
+      ① 删掉候选目录里写死的 `E:\\AI\\Ollama\\Ollama`（别人机器必然找不到）；
+      ② **删掉"找不到 CLI 就退回 `ollama app.exe`"这条分支** —— 那正是"启动时弹 ollama 窗口"
+         的来源，与本文档"必须静默、无窗口"的目标冲突。找不到 CLI 时宁可让上层**明确报错**
+         （提示装 Ollama，或用 `DMB_OLLAMA_EXE` 指定）。
+    """
+    override = os.environ.get("DMB_OLLAMA_EXE")
+    if override and os.path.exists(override):
+        return [override, "serve"], os.path.dirname(override)
     dirs = []
     cli = shutil.which("ollama")
     if cli:
         dirs.append(os.path.dirname(cli))
     dirs += [
+        # 作者机器的历史位置：**不存在时会被下面的 os.path.exists 直接跳过**，
+        # 因此换台机器/换安装位置都不受影响。想彻底去掉，就把它删掉并用
+        # 环境变量 DMB_OLLAMA_EXE 指定你自己的 ollama.exe。
         r"E:\AI\Ollama\Ollama",
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama"),
         r"C:\Program Files\Ollama",
@@ -197,9 +230,6 @@ def find_ollama_launcher():
         exe = os.path.join(d, "ollama.exe")
         if os.path.exists(exe):
             return [exe, "serve"], d
-        app = os.path.join(d, "ollama app.exe")
-        if os.path.exists(app):
-            return [app], d
     return None, None
 
 

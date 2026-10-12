@@ -38,6 +38,12 @@ def _ollama_chat(model, messages, ctx, timeout=600, options=None, stop=None):
     拿到的信息与流式完全相同，却少了一整类兼容问题。
     """
     payload = {"model": model, "messages": messages, "stream": False,
+        # ★ 2026-10-12：照上游 ShinobuTranslator 的做法**显式关闭思考**（reasoning/thinking）。
+        #   上游用 reasoning_effort='none' / reasoning_split 表达同一件事，见
+        #   frontend/packages/text-translation/src/llmThinking.ts。
+        #   不关的话，qwen3.5 这类会思考的模型会先吐几千 token 思考过程（真机：273 字输入 →
+        #   3921 token、73 秒），解析失败并把整条管线堵住。
+        "think": False,
                # 关掉 Ollama 默认的静默 5 分钟卸载（默认 -1 永不过期）
                "keep_alive": keep_alive()}
     if options:
