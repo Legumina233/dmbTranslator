@@ -16,3 +16,5 @@ loguru>=0.7
 
 # ── 服务端 ───────────────────────────────────────
 # 全部使用标准库（http.server / urllib / json），无需额外依赖。
+fugashi
+unidic-lite

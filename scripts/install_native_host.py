@@ -97,7 +97,7 @@ def run(cmd, cwd=None, timeout=600):
 
 def resolve_python():
     for cand in (
-        os.environ.get("DMB_PYTHON"),
+        os.path.join(REPO, ".venv", "Scripts", "python.exe"),  # 仓库自己的 .venv 优先（换盘/换目录/换机器都对；不再被外部环境变量带跑）
         # scripts/setup.cmd 建的虚拟环境在**仓库根** .venv（不在 server/ 下）
         os.path.join(REPO, ".venv", "Scripts", "python.exe"),
         # 兼容早期把 venv 建在 server/ 下的布局
