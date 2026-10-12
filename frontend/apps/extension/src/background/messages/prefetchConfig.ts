@@ -3,7 +3,7 @@ import type { ExtensionMessageSender } from '../../shared/extensionRuntime';
 import type { PrefetchConfigMessage, PrefetchConfigSyncMessage } from '../../shared/messages';
 import { normalizeLastNonZeroPrefetchDepth, normalizePrefetchDepth } from '../../shared/config';
 import { getSettings, setSettings } from '../settings/settingsStore';
-import { resolveActiveTabId } from './memoryCache';
+import { resolveActiveTabIds } from './memoryCache';
 
 /**
  * 把弹窗的**预取设置**（预载页数 + 进入自动翻译）转发到当前标签页的内容脚本。
@@ -24,13 +24,14 @@ export async function pushPrefetchConfig(
   const tabs = chromeApi?.tabs;
   if (!tabs?.query || !tabs?.sendMessage) return;
 
-  const tabId = await resolveActiveTabId(sender);
-  if (tabId === undefined) return;
-
-  try {
-    await tabs.sendMessage(tabId, message);
-  } catch {
-    // 内容脚本未注入 / 页面不匹配：忽略（设置已在 storage，页面下次打开会带上）。
+  const tabIds = await resolveActiveTabIds(sender);
+  for (const tabId of tabIds) {
+    try {
+      await tabs.sendMessage(tabId, message);
+      return; // 推成功一次就够（推送不需要回执）
+    } catch {
+      // 这个标签页没有内容脚本 → 试下一个候选（2026-10-12 修：多窗口下不再赌 list[0]）
+    }
   }
 }
 
