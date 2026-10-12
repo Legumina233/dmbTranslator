@@ -66,6 +66,20 @@ PYINSTALLER_PYTHONS = [
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
+def _safe_stdout():
+    """中文 Windows 控制台是 GBK：emoji（如 ⚠️）会让 print 抛 UnicodeEncodeError 而**整个脚本崩掉**
+    （真机踩过：注册其实已经写好了，却在最后一行提示上崩，exit=1，看起来像失败）。
+    这里只把"当前编码编不出的字符"降级成 ?，**不改编码** —— 中文照常显示。"""
+    try:
+        sys.stdout.reconfigure(errors="replace")
+        sys.stderr.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+
+_safe_stdout()
+
+
 def log(msg):
     print(msg)
     sys.stdout.flush()
