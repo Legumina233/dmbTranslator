@@ -62,6 +62,11 @@ export type LocalModelControlProps = {
   /** 向后预载页数（settings 里的值，**0 = 关闭预载**）。 */
   prefetchDepth: number;
   onPrefetchDepthChange: (depth: number) => void;
+  /**
+   * 「预载打开时回到几」（settings 里的字段，1–10）。
+   * 与 `prefetchDepth` **正交**：它只回答"开的时候回到几"，**永不表达开关状态**。
+   */
+  lastNonZeroPrefetchDepth: number;
   /** 进入阅读页是否自动翻译当前页（**只**管当前页，与预载深度是正交的两个旋钮）。 */
   autoTranslateOnEnter: boolean;
   onAutoTranslateOnEnterChange: (enabled: boolean) => void;
@@ -533,26 +538,37 @@ function TranslationCacheControl({
 function PrefetchControl({
   depth,
   onDepthChange,
+  lastNonZeroDepth,
 }: {
   depth: number;
   onDepthChange: (depth: number) => void;
+  /**
+   * 「打开时回到几」（settings 里的字段）。**可选**：缺席时退回组件内记忆（旧行为），
+   * 这样调用点可以逐个迁移而不会出现"传了半截就崩"。
+   */
+  lastNonZeroDepth?: number;
 }) {
   const [draft, setDraft] = useState(String(depth));
 
   /**
    * 开关"开"时回到的页数。
    *
-   * 说明（2026-10-11 回退）：这里一度改成读设置里的 `lastNonZeroPrefetchDepth`，
-   * 但那次改动让弹窗在切到「本地模型」时崩掉（用户当场反馈），所以先整体回退到
-   * "组件内记忆"这条既有实现；等有测试护着再重做那半边。
+   * ★ 2026-10-11 补完：改为读**设置字段** `lastNonZeroPrefetchDepth`（两处 UI 同一个真相源），
+   *   组件内记忆只作**兜底**（prop 缺席时用旧行为）。
+   *   上次（10-10）直接改成读字段让弹窗崩过，所以这次是"可选 prop + 兜底"：
+   *   任何一半没接上都只是退回旧行为，**不会崩**。字段的**写入点在后台**，这里只读。
    */
-  const lastNonZeroDepth = useRef(defaultPrefetchDepth > 0 ? defaultPrefetchDepth : 1);
+  const fallbackLastNonZero = useRef(defaultPrefetchDepth > 0 ? defaultPrefetchDepth : 1);
 
   useEffect(() => {
     setDraft(String(depth));
-    // 记下最近一个非零深度 —— 开关"关→开"时回到它，而不是把用户刚设的页数丢掉。
-    if (depth > 0) lastNonZeroDepth.current = depth;
+    // 兜底记忆：只有 prop 缺席时才会被用到。
+    if (depth > 0) fallbackLastNonZero.current = depth;
   }, [depth]);
+
+  const rememberedDepth = lastNonZeroDepth !== undefined && lastNonZeroDepth > 0
+    ? lastNonZeroDepth
+    : fallbackLastNonZero.current;
 
   const enabled = depth > 0;
 
@@ -576,7 +592,7 @@ function PrefetchControl({
           role="switch"
           aria-checked={enabled}
           aria-label="向后预载开关"
-          onClick={() => onDepthChange(enabled ? 0 : lastNonZeroDepth.current)}
+          onClick={() => onDepthChange(enabled ? 0 : rememberedDepth)}
         >
           <span className="local-toggle-knob" />
         </button>
@@ -655,6 +671,7 @@ export function LocalModelControl({
   onCacheLimitChange,
   prefetchDepth,
   onPrefetchDepthChange,
+  lastNonZeroPrefetchDepth,
   autoTranslateOnEnter,
   onAutoTranslateOnEnterChange,
 }: LocalModelControlProps) {
@@ -855,7 +872,11 @@ export function LocalModelControl({
 
       <TranslationCacheControl limit={cacheLimit} onLimitChange={onCacheLimitChange} />
 
-      <PrefetchControl depth={prefetchDepth} onDepthChange={onPrefetchDepthChange} />
+      <PrefetchControl
+          depth={prefetchDepth}
+          onDepthChange={onPrefetchDepthChange}
+          lastNonZeroDepth={lastNonZeroPrefetchDepth}
+        />
 
       <AutoTranslateToggle enabled={autoTranslateOnEnter} onChange={onAutoTranslateOnEnterChange} />
 

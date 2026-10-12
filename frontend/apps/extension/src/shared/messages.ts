@@ -226,6 +226,11 @@ export type PrefetchConfigMessage = {
   prefetchDepth: number;
   /** 进入阅读页是否自动翻译当前页（与预载深度是**正交**的两个旋钮）。 */
   autoTranslateOnEnter: boolean;
+  /**
+   * 「预载打开时回到几」（1–10）。与上面两个字段都**正交**：
+   * **永不表达开关状态**（开关只看 `prefetchDepth > 0`）。缺席 = 不改这层记忆。
+   */
+  lastNonZeroPrefetchDepth?: number;
 };
 
 /**
@@ -241,6 +246,8 @@ export type PrefetchConfigSyncMessage = {
   type: 'mt:prefetch-config-sync';
   prefetchDepth?: number;
   autoTranslateOnEnter?: boolean;
+  /** 见 `PrefetchConfigMessage.lastNonZeroPrefetchDepth`（同上：只回答"开的时候回到几"）。 */
+  lastNonZeroPrefetchDepth?: number;
 };
 
 export type RuntimeMessage =
@@ -587,7 +594,12 @@ function isPrefetchConfigMessage(value: Record<string, unknown>): value is Prefe
   // 用户刚在弹窗里改的设置会被悄悄抹掉。
   // 校验只认**已知字段**，多余字段一律忽略：旧版弹窗多推一个已删除的
   // `prefetchEnabled` 也不会让整条消息失效（2026-10-05 清掉 DOM 遥测后就是这么处理的）。
-  return Number.isInteger(value.prefetchDepth)
+  const lastNonZeroOk = value.lastNonZeroPrefetchDepth === undefined
+    // 1 起：0 非法（本字段不允许表达"关"）。
+    || (Number.isInteger(value.lastNonZeroPrefetchDepth)
+      && (value.lastNonZeroPrefetchDepth as number) >= 1);
+  return lastNonZeroOk
+    && Number.isInteger(value.prefetchDepth)
     && (value.prefetchDepth as number) >= 0
     && typeof value.autoTranslateOnEnter === 'boolean';
 }
@@ -598,7 +610,10 @@ function isPrefetchConfigSyncMessage(value: Record<string, unknown>): value is P
     || (Number.isInteger(value.prefetchDepth) && (value.prefetchDepth as number) >= 0);
   const autoOk = value.autoTranslateOnEnter === undefined
     || typeof value.autoTranslateOnEnter === 'boolean';
-  return depthOk && autoOk;
+  const lastNonZeroOk = value.lastNonZeroPrefetchDepth === undefined
+    || (Number.isInteger(value.lastNonZeroPrefetchDepth)
+      && (value.lastNonZeroPrefetchDepth as number) >= 1);
+  return depthOk && autoOk && lastNonZeroOk;
 }
 
 function isDiagnosticLogEventMessage(value: Record<string, unknown>): value is DiagnosticLogEventMessage {

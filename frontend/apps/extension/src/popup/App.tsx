@@ -1027,6 +1027,7 @@ export function App() {
                         updateField('translationCacheLimit', nextLimit)
                       }
                       prefetchDepth={settings.prefetchDepth}
+                      lastNonZeroPrefetchDepth={settings.lastNonZeroPrefetchDepth}
                       onPrefetchDepthChange={(nextDepth) =>
                         updateField('prefetchDepth', nextDepth)
                       }

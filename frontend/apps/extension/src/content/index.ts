@@ -10,7 +10,20 @@ import {
   extractShowkeyFromScripts,
 } from './core/scheduler/showpageClient';
 import { createPrefetchExecutor } from './core/scheduler/prefetchExecutor';
-import { defaultPrefetchDepth, normalizePrefetchDepth } from '../shared/config';
+import { resolveSiteTranslationPage } from './adapters/ehentaiPageTarget';
+import {
+  clickControl,
+  findControlForDirection,
+  readDeclaredTarget,
+  readLoadImageTarget,
+  turnDirectionOf,
+} from './adapters/ehentaiPageControls';
+import { createTurnDriver } from './core/pageTurn/turnDriver';
+import {
+  defaultPrefetchDepth,
+  normalizeLastNonZeroPrefetchDepth,
+  normalizePrefetchDepth,
+} from '../shared/config';
 import { sendRuntimeMessage } from '../shared/messages';
 import { createProbe, flushProbeRelay } from '../shared/probe';
 import { getExtensionApi, isExtensionContextInvalidated, type ExtensionPort } from '../shared/extensionRuntime';
@@ -88,6 +101,13 @@ function srcTail(url: string): string {
   }
 }
 
+/**
+ * 翻页意图队列的"排空"入口（由下面的 e-hentai 块填充；非 e-hentai 页恒为 null）。
+ * 站点"下一页"按钮在翻页后约 0~1 秒内仍指向**当前页**，这期间的点击会被它当作"再打开当前页"
+ * 而忽略 —— 队列把被忽略的那几次记下来，等控件更新后替用户点一下。
+ */
+let flushTurnQueue: (() => void) | null = null;
+
 // --- 贴图**以站点为准**（毛病 A · 2026-10-11 用户拍板）------------------------------
 // 这里以前是"意图即换图"：按键/点击的**瞬间**就按 ±1 预测下一页，并把那一页的译图浮上去
 // （省 ~0.5-1s）。但站点**不一定接受**那次翻页 —— 实测快速连点第二下是 `accepted=False`，
@@ -111,7 +131,7 @@ if (adapter === ehentaiAdapter) {
     };
   }
   // ★ 临时测量：只**记录**"用户想翻到哪一页"，**不贴图**（贴图改由下面的"以站点为准"负责）。
-  //   它给 `page:action` / `page:path` / `page:onload` 提供时间起点，用来验证毛病 A 的效果。
+  //   它给 `page:action` / `page:path` / `page:onload` 提供时间起点。
   function recordPageAction(page: number, kind: 'keyboard' | 'click'): void {
     const identity = parseEhentaiPageIdentity(location.pathname);
     if (!identity) return;
@@ -135,21 +155,68 @@ if (adapter === ehentaiAdapter) {
       src: srcTail(lastPageAction.elementSrc),
     });
   }
-  window.addEventListener('keydown', (ev) => {
+
+  // ── 翻页欠账（**方案甲** · 由事实算账）───────────────────────────────────────────
+  // 规则与理由见 `core/pageTurn/turnLedger.ts` 与 `turnDriver.ts`：
+  //   欠账 = 你按了几下 − 该方向实际走过的格数（下限 0、上限 3）。
+  // 这里**只做接线**：把 DOM 与时间注入驱动器，并按节奏调 `tick()`。
+  // 那两个模块都有单测 + jsdom 集成测试（连按 3 下→3 格、上限、方向反转、识别自己的替点）。
+  const turnDriver = createTurnDriver({
+    readPage: () => parseEhentaiPageIdentity(location.pathname)?.page ?? null,
+    findControl: (direction) => findControlForDirection(direction),
+    clickControl: (control) => clickControl(control),
+    onEvent: (event) => {
+      if (event.type === 'settled') return;
+      probe('page:turn-queue', {
+        pressed: event.type === 'pressed' ? event.direction : undefined,
+        kind: event.type === 'pressed' ? event.kind : undefined,
+        owed: event.owed,
+        direction: event.direction,
+        page: event.page,
+      });
+    },
+  });
+
+  /** 有欠账时的驱动定时器（欠账清零就停，不常驻）。 */
+  let turnDriveHandle: number | null = null;
+  const turnDriveMs = 400;
+
+  function stopTurnDrive(): void {
+    if (turnDriveHandle === null) return;
+    window.clearTimeout(turnDriveHandle);
+    turnDriveHandle = null;
+  }
+
+  /** 交付一格；还有欠账就按节奏继续。 */
+  function driveTurns(): void {
+    stopTurnDrive();
+    if (turnDriver.tick() > 0) turnDriveHandle = window.setTimeout(driveTurns, turnDriveMs);
+  }
+
+  /** 记一次用户操作，并确保驱动在跑。 */
+  function pressTurn(direction: 1 | -1, kind: 'keyboard' | 'click'): void {
     const identity = parseEhentaiPageIdentity(location.pathname);
-    if (!identity) return;
-    if (ev.key === 'ArrowRight') recordPageAction(identity.page + 1, 'keyboard');
-    else if (ev.key === 'ArrowLeft') recordPageAction(identity.page - 1, 'keyboard');
+    if (identity === null) return;
+    recordPageAction(identity.page + direction, kind);
+    if (turnDriver.press(direction, kind) > 0) driveTurns();
+    else stopTurnDrive();
+  }
+  flushTurnQueue = driveTurns; // 复用预取块原有的三个调用点（到达 / 原图加载完 / 每秒）当额外节拍
+
+  window.addEventListener('keydown', (ev) => {
+    // 过滤自动重复：按住方向键 = **一次**意图（不是每秒 30 次）。
+    if (ev.repeat) return;
+    if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
+    pressTurn(ev.key === 'ArrowRight' ? 1 : -1, 'keyboard');
   }, true);
   window.addEventListener('click', (ev) => {
     if (ev.button !== 0 || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
-    const anchor = (ev.target as Element | null)?.closest?.('a[href]');
-    const href = anchor?.getAttribute('href');
-    if (!href) return;
-    try {
-      const m = /^\/s\/[0-9a-f]+\/(\d+)-(\d+)(?:[?#/]|$)/i.exec(new URL(href, location.href).pathname);
-      if (m) recordPageAction(Number(m[2]), 'click');
-    } catch { /* 非法 href 忽略 */ }
+    // 我们自己"替用户点"的那一下不算用户操作（否则账会越滚越多）。
+    if (turnDriver.consumeOwnClick()) return;
+    // 方向**按操作**判定（`#prev` / `#next` / `#i3` 里的链接）；认不出 → 什么都不做（不猜）。
+    const direction = turnDirectionOf(ev.target as Element | null);
+    if (direction === null) return;
+    pressTurn(direction, 'click');
   }, true);
 }
 
@@ -181,7 +248,17 @@ const PREFETCH_ENABLED = true;
 type PrefetchConfigPatch = {
   prefetchDepth?: unknown;
   autoTranslateOnEnter?: unknown;
+  /** 「预载打开时回到几」（1–10）—— **永不表达开关状态**，只回答"开的时候回到几"。 */
+  lastNonZeroPrefetchDepth?: unknown;
 };
+
+/**
+ * 「预载打开时回到几」的**页面侧投影**：由后台推送/回读的值同步过来，
+ * 供右下角开关"关掉再打开"时用 —— 不再硬编码回到默认 4。
+ *
+ * 仍然**只读**：唯一写入点是后台 `syncPrefetchConfig`；本变量只是把那个值搬到这里。
+ */
+let pageLastNonZeroDepth = defaultPrefetchDepth;
 /**
  * 预取设置的应用入口（由预取块填充；非 e-hentai 页 / 预取关时为 null）。
  * 消息 listener 在模块级，而预取执行器活在下面的块作用域里 —— 用这个引用桥接，
@@ -389,7 +466,7 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
         // 好过为此再存一个"上次的非零深度"（那等于用一个新字段换掉刚删掉的那个）。
         const { depth, autoTranslateOnEnter } = executor.snapshot();
         void (kind === 'prefetch'
-          ? syncPageToggles({ prefetchDepth: depth > 0 ? 0 : defaultPrefetchDepth })
+          ? syncPageToggles({ prefetchDepth: depth > 0 ? 0 : pageLastNonZeroDepth })
           : syncPageToggles({ autoTranslateOnEnter: !autoTranslateOnEnter }));
       });
       root.appendChild(button);
@@ -417,6 +494,13 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
       // 后台应答里的**当前值**直接喂给应用函数，由它写进执行器 ——
       // 应用函数自己按 `!== undefined` 逐字段判断，不用在这里先抄一遍、再让它抄第二遍。
       // （重绘也由它结尾统一做，这里不重复调。）
+      // ★ 从后台 sync 应答里读"打开时回到几"（**只读投影**）。
+      if (typeof data.lastNonZeroPrefetchDepth === 'number') {
+        pageLastNonZeroDepth = normalizeLastNonZeroPrefetchDepth(
+          data.lastNonZeroPrefetchDepth,
+          pageLastNonZeroDepth,
+        );
+      }
       applyPrefetchConfigImpl(data);
     } catch {
       // 后台不可用 / 上下文失效：开关保持上次状态，不刷错误。
@@ -431,6 +515,13 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
     if (executor.snapshot().depth > 0) renderPageToggles();
     // ★ 临时测量：站点可能整个换掉那个 `<img>` 元素，这里补挂一次观察（幂等、不改行为）。
     probeObserveImage();
+    // ★ 临时测量：翻页后前 5 拍看一下"下一页"控件指向哪一页（控件可能在加载完才更新）。
+    if (navProbeTicks < 5) {
+      navProbeTicks += 1;
+      probeNavTargets('tick');
+    }
+    // ★ 翻页队列：每秒也排空一次（控件更新可能既不触发 onload 也不触发导航观察）。
+    flushTurnQueue?.();
   }, 1000);
 
   const client = createShowpageClient({
@@ -465,6 +556,51 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
   let probeImage: HTMLImageElement | null = null;
   let probeSrcObserver: MutationObserver | null = null;
   let probeLastSrc = '';
+  /** ★ 临时测量：每次翻页后只打前几拍，避免每秒刷屏。 */
+  let navProbeTicks = 0;
+
+  /**
+   * ★ 临时测量（2026-10-11 · 队列可行性）：站点"下一页"控件的**目标页码**。
+   *
+   * 要回答的问题：连点第二下被站点忽略之后，那个"下一页"控件是**什么时候**才指向下一页的？
+   * - 若"原图一加载完就指向下一页" → "替用户点一下"能立刻推进（队列有意义）；
+   * - 若它更早就指向下一页（只是加载被串行阻塞）→ 同样能提前推进；
+   * - 若它长期不更新 → 队列也只能等站点。
+   * **只记录，不改动任何东西。**
+   */
+  function probeNavTargets(when: string): void {
+    const identity = parseEhentaiPageIdentity(location.pathname);
+    if (!identity) return;
+    // ★ 2026-10-11 改为记录**每个翻页控件的稳定身份**（DOM 顺序 / id / class / alt / title / 是否含图）。
+    //   原因：方向判定必须"按操作"（用户点的是哪个按钮），**不能按它此刻声明的页码猜** ——
+    //   陈旧窗口里那个号码是乱的（往前翻后"上一页"会声明 current-2；往回翻后"下一页"会声明 current+1），
+    //   我上一版就是靠它猜，结果出现"翻回去又翻回来"。
+    const nodes = [...document.querySelectorAll('a, area, [onclick]')].filter((node) => {
+      const onclick = node.getAttribute('onclick') ?? '';
+      const href = node.getAttribute('href') ?? '';
+      return /load_image\(/.test(onclick) || /\/s\/[0-9a-f]+\/\d+-\d+/.test(href);
+    });
+    const controls = nodes.slice(0, 12).map((node, index) => ({
+      i: index,
+      tag: node.tagName.toLowerCase(),
+      id: node.id || null,
+      cls: (node.getAttribute('class') ?? '').slice(0, 20) || null,
+      alt: node.querySelector('img')?.getAttribute('alt') ?? node.getAttribute('alt') ?? null,
+      title: node.getAttribute('title') ?? null,
+      text: (node.textContent ?? '').trim().slice(0, 10) || null,
+      declared: readLoadImageTarget(node) ?? readDeclaredTarget(node),
+      parent: (node.parentElement?.id
+        || node.parentElement?.getAttribute('class')
+        || '').slice(0, 20) || null,
+    }));
+    probe.timed('page:nav-controls', lastPageAction?.at ?? probe.mark(), {
+      when,
+      page: identity.page,
+      count: nodes.length,
+      controls,
+    });
+  }
+
   function probeSrcReport(event: string): void {
     const identity = parseEhentaiPageIdentity(location.pathname);
     probe.timed(event, lastPageAction?.at ?? probe.mark(), {
@@ -477,8 +613,12 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
       src: srcTail(probeLastSrc),
     });
   }
+
   function probeOnImageLoad(): void {
     probeSrcReport('page:onload');
+    probeNavTargets('onload');
+    // ★ 翻页队列：原图加载完时，站点的"下一页"控件通常已经指向下一页 → 排空一次。
+    flushTurnQueue?.();
   }
   function probeObserveImage(): void {
     const element = adapter.findImages()[0]?.element as HTMLImageElement | undefined;
@@ -508,6 +648,8 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
   function showCurrentPageTranslation(identity: { gid: number; page: number }): void {
     if (!core.isDisplayModeTranslated()) return; // 全局原图模式：画框不抢戏
     const pageKey = `${identity.gid}-${identity.page}`;
+    // ★ 毛病 A 的判据（纯函数，有测试）：**只贴站点已经翻到的那一页**。
+    if (resolveSiteTranslationPage({ pathname: location.pathname, pageKey }) === null) return;
     const url = core.getTranslatedUrl(pageKey);
     if (!url) return; // 这一页的译图还不在**内存**里（落盘层的要等挂载时物化，那条路自己会贴）
     const img = document.getElementById('img') as HTMLImageElement | null;
@@ -540,6 +682,11 @@ if (adapter === ehentaiAdapter && PREFETCH_ENABLED && typeof window !== 'undefin
     probeObserveImage();
     // ★ 毛病 A：贴图**以站点为准** —— 网址已经变到这一页，才贴这一页的译图。
     showCurrentPageTranslation(identity);
+    // ★ 临时测量：到达新页时，"下一页"控件的目标页码长什么样。
+    navProbeTicks = 0;
+    probeNavTargets('navigate');
+    // ★ 翻页队列：新页到达时也排空一次（控件可能已经指向下一页）。
+    flushTurnQueue?.();
     publishTelemetry();
   };
 
@@ -992,7 +1139,15 @@ const handleRuntimeMessage = (message: unknown, _sender: unknown, sendResponse: 
       });
       // 用共享的 `PrefetchConfigPatch` 收窄，不在本地再写一遍断言 —— 字段增删只改一处，
       // 不会再出现"本地断言漏了一个字段、于是那条路径在类型上隐形"的情况。
-      applyPrefetchConfig?.(message as PrefetchConfigPatch);
+      const patch = message as PrefetchConfigPatch;
+      // ★ 从后台推来的值里读"打开时回到几"（**只读投影**）。
+      if (typeof patch.lastNonZeroPrefetchDepth === 'number') {
+        pageLastNonZeroDepth = normalizeLastNonZeroPrefetchDepth(
+          patch.lastNonZeroPrefetchDepth,
+          pageLastNonZeroDepth,
+        );
+      }
+      applyPrefetchConfig?.(patch);
       sendResponse({ ok: true, type: 'mt:prefetch-config' });
       return true;
     }
@@ -1012,8 +1167,11 @@ const handleRuntimeMessage = (message: unknown, _sender: unknown, sendResponse: 
           }
           return { ...core.getMemoryCacheInfo(), cleared: 0 };
         })();
-        // clear 的 off-screen 那半是 `void` 发出的（不阻塞页面），读取排在它之后投递，
-        // 由 broker 保证的投递顺序即可拿到清空后的真实条数。
+        // ★ 2026-10-11 修 bug：清空落盘层必须**等它真的清完**再读条数。
+        //   原来只"发了不管"，读取常常跑在清空前面 → 第一次点「删除全部」数字不变、要点第二次。
+        if (message.action === 'clear') {
+          await core.clearVaultCache();
+        }
         const vault = await core.getVaultCacheSize();
         // 探针：弹窗读到的那个数字，在页面侧长什么样。
         probe('msg:memory-cache', {

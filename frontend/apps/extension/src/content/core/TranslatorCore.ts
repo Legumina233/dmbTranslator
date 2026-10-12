@@ -242,6 +242,21 @@ export class TranslatorCore {
   }
 
   /**
+   * 清空**落盘那层**缓存，并**等它真的清完**（弹窗「删除全部」用）。
+   *
+   * ★ 2026-10-11 修 bug：`clearMemoryCache()` 里那句 `void this.vault.clear()` 是"发了不管"，
+   *   而调用方紧接着就去读条数 → 读常常跑在清空前面 → 真机表现是
+   *   **第一次点「删除全部」数字不变、要点第二次才变 0**。所以这里给一个"可等待"的入口。
+   */
+  async clearVaultCache(): Promise<void> {
+    try {
+      await this.vault.clear();
+    } catch {
+      // 缓存是加速器：清不掉也不能让按钮报错（下次写入时还会按上限裁剪）。
+    }
+  }
+
+  /**
    * 清空内存译图。
    * **必须顺手把常驻画框上的旧图撤掉** —— blob URL 一撤销，画框再挂着就是一张裂图。
    *

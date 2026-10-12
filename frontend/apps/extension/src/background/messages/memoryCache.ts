@@ -13,6 +13,13 @@ import type { MemoryCacheMessage, MemoryCacheResult } from '../../shared/message
  *   （`tab.id` 不需要权限，需要权限的是 url）→ 这里只用 `id`，绝不拿 url 做判定。
  * - 内容脚本没注入（停在 `chrome://` 扩展页 / 不是目标站点）时 `sendMessage` 会抛，
  *   这时必须如实回 `reached:false` —— **不许回 `size:0` 把"没连上"伪装成"缓存是空的"**。
+ *
+ * ★ 2026-10-12 真机修 bug（用户报"重载/重开浏览器后弹窗永远显示未连接"）：
+ *   原来只取 `tabs.query({active:true})` 的 **`list[0]`**。弹窗发消息时 `sender.tab` 是
+ *   `undefined` → 查询退化成"**所有窗口**的活动标签页"，而 Chrome **不保证** `list[0]`
+ *   是弹窗所在窗口的那个 → 拿到别的窗口的标签页 → 那页没有内容脚本 → `sendMessage` 抛
+ *   → 回 `reached:false`。它与页面状态无关，所以**刷新页面/重开浏览器都治不好**。
+ *   现在改成：**枚举候选、逐个试，第一个答上来的就用**（页面侧一切正常时必然能命中）。
  */
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -27,38 +34,55 @@ function unreachable(): MemoryCacheResult {
   return { size: 0, vaultSize: 0, limit: 0, cleared: 0, reached: false };
 }
 
+type TabLike = { id?: number; windowId?: number };
+
 /**
- * 找到**发起消息的那个窗口里的活动标签页**（弹窗 → 它所在窗口的活动标签页）。
+ * 找到**候选标签页**（把"最可能是弹窗所在窗口"的排在前面）。
  *
- * 两条 MV3 事实（踩过）：
- * - `tabs.query` 的类型只认 `{active, windowId}`（没有 `currentWindow`），windowId 从 sender 取；
- * - 没有 `tabs` 权限时 `tab.url` 是 `undefined`（`id` 不需要权限、`url` 需要）→ 只用 `id`。
+ * ★ 为什么不返回单个 id：`tabs.query({active:true})` 会把**每个窗口**的活动标签页都列出来，
+ *   而顺序是 Chrome 的实现细节。所以调用方必须**逐个试**，不能赌第一个。
  *
- * 找不到（没权限 / 查询抛错）→ `undefined`。
+ * `sender.tab` 存在时（消息来自某个标签页）优先它所在窗口。
+ * 找不到（没权限 / 查询抛错）→ 空数组。
  */
-export function resolveActiveTabId(sender: ExtensionMessageSender): Promise<number | undefined> {
+export async function resolveActiveTabIds(sender: ExtensionMessageSender): Promise<number[]> {
   const chromeApi = getExtensionApi();
   const tabs = chromeApi?.tabs;
   const runtime = chromeApi?.runtime;
-  if (!tabs?.query || !tabs?.sendMessage) return Promise.resolve(undefined);
+  if (!tabs?.query) return [];
 
   const query = tabs.query;
-  const windowId = typeof sender.tab?.windowId === 'number' ? sender.tab.windowId : undefined;
-  return new Promise<number | undefined>((resolve) => {
+  const senderWindowId = typeof sender.tab?.windowId === 'number' ? sender.tab.windowId : undefined;
+
+  const raw = await new Promise<unknown>((resolve) => {
     try {
-      query({ active: true, ...(windowId !== undefined ? { windowId } : {}) }, (list) => {
+      query({ active: true }, (list) => {
         const lastError = runtime?.lastError;
         if (lastError?.message) {
-          resolve(undefined);
+          resolve([]);
           return;
         }
-        const first = Array.isArray(list) ? list[0] : undefined;
-        resolve(typeof first?.id === 'number' ? first.id : undefined);
+        resolve(list);
       });
     } catch {
-      resolve(undefined);
+      resolve([]);
     }
   });
+
+  const list = (Array.isArray(raw) ? raw : []) as TabLike[];
+  const sameWindow: number[] = [];
+  const others: number[] = [];
+  for (const tab of list) {
+    if (typeof tab?.id !== 'number') continue;
+    if (senderWindowId !== undefined && tab.windowId === senderWindowId) sameWindow.push(tab.id);
+    else others.push(tab.id);
+  }
+  return [...sameWindow, ...others];
+}
+
+/** 兼容旧调用点（推送预取设置用）：候选里的第一个。 */
+export async function resolveActiveTabId(sender: ExtensionMessageSender): Promise<number | undefined> {
+  return (await resolveActiveTabIds(sender))[0];
 }
 
 export async function maintainMemoryCache(
@@ -69,25 +93,27 @@ export async function maintainMemoryCache(
   const tabs = chromeApi?.tabs;
   if (!tabs?.query || !tabs?.sendMessage) return unreachable();
 
-  const tabId = await resolveActiveTabId(sender);
-  if (tabId === undefined) return unreachable();
-
-  try {
-    const response: unknown = await tabs.sendMessage(tabId, message);
-    if (!isRecord(response) || response.ok !== true || !isRecord(response.cache)) {
-      return unreachable();
+  const tabIds = await resolveActiveTabIds(sender);
+  for (const tabId of tabIds) {
+    try {
+      const response: unknown = await tabs.sendMessage(tabId, message);
+      if (!isRecord(response) || response.ok !== true || !isRecord(response.cache)) {
+        continue; // 这个标签页答得不对（或没内容脚本）→ 试下一个候选
+      }
+      const cache = response.cache;
+      return {
+        size: numberOr(cache.size, 0),
+        // off-screen 那层的条数：弹窗显示"有几张"读的是它（内容脚本那层刷新即归零）。
+        vaultSize: numberOr(cache.vaultSize, 0),
+        limit: numberOr(cache.limit, 0),
+        cleared: numberOr(cache.cleared, 0),
+        reached: true,
+      };
+    } catch {
+      // 这个标签页没有内容脚本（停在 chrome:// / 非目标站点）→ 试下一个候选
     }
-    const cache = response.cache;
-    return {
-      size: numberOr(cache.size, 0),
-      // off-screen 那层的条数：弹窗显示"有几张"读的是它（内容脚本那层刷新即归零）。
-      vaultSize: numberOr(cache.vaultSize, 0),
-      limit: numberOr(cache.limit, 0),
-      cleared: numberOr(cache.cleared, 0),
-      reached: true,
-    };
-  } catch {
-    // 内容脚本未注入 / 页面不匹配：如实报"没连上"
-    return unreachable();
   }
+
+  // 所有候选都没答上来：如实报"没连上"，**不许**伪装成"缓存是空的"。
+  return unreachable();
 }

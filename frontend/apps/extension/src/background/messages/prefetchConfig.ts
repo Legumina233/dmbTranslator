@@ -1,7 +1,7 @@
 import { getExtensionApi } from '../../shared/extensionRuntime';
 import type { ExtensionMessageSender } from '../../shared/extensionRuntime';
 import type { PrefetchConfigMessage, PrefetchConfigSyncMessage } from '../../shared/messages';
-import { normalizePrefetchDepth } from '../../shared/config';
+import { normalizeLastNonZeroPrefetchDepth, normalizePrefetchDepth } from '../../shared/config';
 import { getSettings, setSettings } from '../settings/settingsStore';
 import { resolveActiveTabId } from './memoryCache';
 
@@ -51,15 +51,17 @@ export async function pushPrefetchConfig(
 export async function syncPrefetchConfig(
   message: PrefetchConfigSyncMessage,
   sender: ExtensionMessageSender,
-): Promise<{ prefetchDepth: number; autoTranslateOnEnter: boolean }> {
+): Promise<{ prefetchDepth: number; autoTranslateOnEnter: boolean; lastNonZeroPrefetchDepth: number }> {
   const current = await getSettings();
   const wantsWrite = message.prefetchDepth !== undefined
-    || message.autoTranslateOnEnter !== undefined;
+    || message.autoTranslateOnEnter !== undefined
+    || message.lastNonZeroPrefetchDepth !== undefined;
 
   if (!wantsWrite) {
     return {
       prefetchDepth: current.prefetchDepth,
       autoTranslateOnEnter: current.autoTranslateOnEnter,
+      lastNonZeroPrefetchDepth: current.lastNonZeroPrefetchDepth,
     };
   }
 
@@ -67,11 +69,25 @@ export async function syncPrefetchConfig(
     ? current.prefetchDepth
     : normalizePrefetchDepth(message.prefetchDepth);
   const nextAuto = message.autoTranslateOnEnter ?? current.autoTranslateOnEnter;
+  // ★ 「预载打开时回到几」的**唯一写入点**（不变量 3）：
+  //   · 消息里显式带了它（1 起）→ 用它；
+  //   · 否则**只有**把深度设成**非零合法值**时才更新这层记忆；
+  //   · 设成 0（= 关闭）时**不动它** —— 这正是"关掉再打开回到原来的数"成立的原因。
+  //   本字段**从不参与开关判断**（开关只看 `prefetchDepth > 0`）。
+  const nextLastNonZero = message.lastNonZeroPrefetchDepth !== undefined
+    ? normalizeLastNonZeroPrefetchDepth(
+      message.lastNonZeroPrefetchDepth,
+      current.lastNonZeroPrefetchDepth,
+    )
+    : nextDepth > 0
+      ? nextDepth
+      : current.lastNonZeroPrefetchDepth;
 
   const saved = await setSettings({
     ...current,
     prefetchDepth: nextDepth,
     autoTranslateOnEnter: nextAuto,
+    lastNonZeroPrefetchDepth: nextLastNonZero,
   });
 
   await pushPrefetchConfig(
@@ -79,6 +95,7 @@ export async function syncPrefetchConfig(
       type: 'mt:prefetch-config',
       prefetchDepth: saved.prefetchDepth,
       autoTranslateOnEnter: saved.autoTranslateOnEnter,
+      lastNonZeroPrefetchDepth: saved.lastNonZeroPrefetchDepth,
     },
     sender,
   );
@@ -86,5 +103,6 @@ export async function syncPrefetchConfig(
   return {
     prefetchDepth: saved.prefetchDepth,
     autoTranslateOnEnter: saved.autoTranslateOnEnter,
+    lastNonZeroPrefetchDepth: saved.lastNonZeroPrefetchDepth,
   };
 }

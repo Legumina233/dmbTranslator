@@ -266,9 +266,12 @@ describe('prefetch config sync（页面右下角开关 → 设置）', () => {
 
     // 2026-10-09：`prefetchEnabled` 删除后只剩这两个字段；
     // 「要不要预载」现在由 prefetchDepth 表达（0 = 关闭预载）。
+    // 2026-10-11：多了「打开时回到几」（`lastNonZeroPrefetchDepth`）——
+    // 它与开关**正交**：纯读也要回当前值（页面开关靠它决定"关掉再打开回到几"）。
     await expect(syncPrefetchConfig({ type: 'mt:prefetch-config-sync' }, sender)).resolves.toEqual({
       prefetchDepth: defaultPrefetchDepth,
       autoTranslateOnEnter: defaultAutoTranslateOnEnter,
+      lastNonZeroPrefetchDepth: defaultPrefetchDepth,
     });
     expect(pushed).toHaveLength(0);
   });

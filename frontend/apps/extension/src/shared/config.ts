@@ -134,6 +134,15 @@ export type ExtensionSettings = {
    */
   prefetchDepth: number;
   /**
+   * 「预载打开时回到几」—— **只回答这一个问题，永不表达开关状态**（语义正交）。
+   *
+   * - 开关判断**永远**只看 `prefetchDepth > 0`；本字段是 0 时也**不算"关"**。
+   * - 例：本字段 = 7 而 `prefetchDepth = 0` → 开关显示"关"（看的是 depth），用户再打开时回到 7。
+   * - 唯一写入点：`prefetchDepth` 被设成**非零合法值**时同步写入（见 `syncPrefetchConfig`）。
+   * - 取值 1–10 整数；0 / 越界 / 非整数一律回落（见 `normalizeLastNonZeroPrefetchDepth`）。
+   */
+  lastNonZeroPrefetchDepth: number;
+  /**
    * 进入阅读页后**自动翻译当前页**（默认关）。
    * 关 = 保持"点按钮才译"；开 = 到达即译当前页（窗口下界放宽到 distance ≥ 0）。
    *
@@ -234,10 +243,24 @@ export function normalizePrefetchDepth(value: unknown): number {
   return Math.min(maxPrefetchDepth, Math.max(minPrefetchDepth, parsed));
 }
 
+/**
+ * 归一化「预载打开时回到几」（`lastNonZeroPrefetchDepth`）。
+ *
+ * ★ 与 `normalizePrefetchDepth` 的**唯一区别**：这里是 **1 起**（0 非法）——
+ *   本字段只回答"开的时候回到几"，**不允许**用它表达"关"（那是 `prefetchDepth` 的职责）。
+ *   非法值一律回落到 `fallback`（迁移口径：沿用当前深度，当前深度为 0 时用默认值）。
+ */
+export function normalizeLastNonZeroPrefetchDepth(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) return fallback;
+  return Math.min(maxPrefetchDepth, value);
+}
+
 export const defaultExtensionSettings: ExtensionSettings = {
   targetLang: 'zh-CHS',
   translationCacheLimit: defaultTranslationCacheLimit,
   prefetchDepth: defaultPrefetchDepth,
+  // 全新安装：把"打开时回到几"设成默认深度（= 4）—— 开关关掉再打开就是回到 4。
+  lastNonZeroPrefetchDepth: defaultPrefetchDepth,
   autoTranslateOnEnter: false,
   imageEngine: 'local',
   geminiAppExperimentalEnabled: false,
@@ -546,6 +569,24 @@ export function normalizeSettings(value: unknown): ExtensionSettings {
       // （与 `pageLogEnabled → eventLogEnabled` 同一套旧键兼容口径：老的显式选择要活下来。）
       raw.prefetchEnabled === false ? 0 : raw.prefetchDepth,
     ),
+    // ★ 迁移（2026-10-11）：老设备**没有**这个字段 → **沿用当前的预载深度**。
+    //   口径：用户当初设的是 8，升级后把预载关掉再打开，仍应回到 8（而不是被重置成 4）；
+    //   当前深度为 0（关闭）或非法时，落到默认值 4。
+    //   注意本字段**从不参与开关判断** —— 开关只看上面那个 `prefetchDepth > 0`。
+    lastNonZeroPrefetchDepth: ((): number => {
+      // ★ 不变量（2026-10-12 真机修）：**写入的预载深度只要是非零合法值，记忆值就必须等于它**。
+      //   必须放在**设置层**，不能只放在某个调用点 —— 弹窗与右下角开关各有一条写入路径，
+      //   只改其中一条就会真机复现"弹窗里设成 8、关掉再打开又跳回 4"。
+      //   语义正交**不变**：深度为 0 时**不动**记忆值（这正是"关掉再打开回到 8"成立的原因）。
+      const depth = normalizePrefetchDepth(
+        raw.prefetchEnabled === false ? 0 : raw.prefetchDepth,
+      );
+      const remembered = normalizeLastNonZeroPrefetchDepth(
+        raw.lastNonZeroPrefetchDepth,
+        depth > 0 ? depth : defaultPrefetchDepth,
+      );
+      return depth > 0 ? depth : remembered;
+    })(),
     autoTranslateOnEnter: sanitizeBoolean(
       raw.autoTranslateOnEnter,
       defaultExtensionSettings.autoTranslateOnEnter,

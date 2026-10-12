@@ -419,6 +419,50 @@ describe('ImageTranslationController', () => {
     });
 
     /**
+     * ★ C 方案（2026-10-11 用户拍板）：**用户点当前页的翻译按钮时，抢占正在跑的后台预取。**
+     *
+     * 背景（真机数据）：管线是单飞（一次只做一页），后台预取会占住它十几秒 ——
+     * 用户点了当前页却要排队等（日志里 `xlate:queued position=1` ≈3.7 秒）。
+     * 拍板的语义是"**断掉当前预载任务、让当前页立刻开工**"（用户原话：
+     * 本质上和"只允许当前页翻完再预载下一页"时间一样，只是预载做了一半断掉，不算浪费）。
+     *
+     * 这条测试钉住：预取被**中止**（signal.aborted）、它那页退回 idle、当前页自己的任务照常开始。
+     * 若哪天有人把抢占删了/改坏（例如让当前页去排队），这里会立刻红。
+     */
+    it('★ C 方案：点当前页翻译时抢占正在跑的后台预取（让路），当前页照常开工', async () => {
+      let prefetchSignal: AbortSignal | undefined;
+      let pipelineCalls = 0;
+      const harness = createHarness({
+        resolveTarget: () => undefined, // 预取的典型场景：那一页还没翻到
+        dependencies: {
+          runLocalPipeline: (_file, _config, _onProgress, options) => {
+            pipelineCalls += 1;
+            if (pipelineCalls === 1) {
+              // 后台预取：挂住不结束，模拟"占着管线"
+              prefetchSignal = options?.signal;
+              return new Promise(() => undefined);
+            }
+            // 当前页自己的任务：正常跑完
+            return Promise.resolve(localResult());
+          },
+        },
+      });
+
+      void harness.controller.translateInBackground('4218710-9', 'https://x/9.webp');
+      await vi.waitFor(() => expect(prefetchSignal).toBeDefined());
+
+      harness.target.element = { referrerPolicy: 'origin' } as HTMLImageElement;
+      await harness.controller.handleTranslateClick(harness.target);
+
+      // ① 正在跑的后台预取被中止（抢占生效）
+      expect(prefetchSignal?.aborted).toBe(true);
+      expect(harness.store.get('4218710-9')).toMatchObject({ status: 'idle' });
+      // ② 当前页自己的任务照常开始（不是排队等预取）
+      expect(pipelineCalls).toBe(2);
+      expect(harness.store.get(harness.target.key)).toMatchObject({ status: 'translated' });
+    });
+
+    /**
      * ★ 用户问的那个具体场景（2026-10-03）：
      * **翻页过快 —— 下一页还没预翻译完，用户已经跳过去了。**
      *
