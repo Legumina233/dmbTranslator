@@ -60,6 +60,23 @@ scripts\test_ocr.cmd             :: OCR 冒烟测试
 > - 文件名：`torch-2.6.0+cu124-cp311-cp311-win_amd64.whl`（约 2.4 GB）
 > - 必须匹配：Python **3.11** → `cp311`；64 位 Windows → `win_amd64`；**不要** `+cpu`（那是纯 CPU 版）
 > - 也可以什么都不做：`setup.cmd` 会自己用 `curl` 从上面那个镜像下载（带进度、可重试）
+### 4. 网络慢 / 下载总失败？提前下好这三样
+
+`setup.cmd` 会自己下载它们，但国内网络下可能很慢或中断。**手动下好放进指定位置，脚本就会直接用**（不会重复下载）。
+
+| 要下什么 | 下载地址 | 放哪儿（脚本会自动识别） | 大小 |
+|---|---|---|---|
+| **Python 3.11**（免安装版，首选） | <https://globalcdn.nuget.org/packages/python.3.11.9.nupkg> | `<仓库>\.tools\cache\tmp\dmb-python-3.11.9.nupkg` | ~17 MB |
+| Python 3.11（官方安装器，仅兜底用） | <https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe> | `<仓库>\.tools\cache\tmp\dmb-python-3.11.9-amd64.exe` | ~25 MB |
+| **Node 24**（便携版 zip） | <https://npmmirror.com/mirrors/node/v24.21.0/node-v24.21.0-win-x64.zip>（国内）<br><https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip>（官方） | `<仓库>\.tools\cache\tmp\node-v24.21.0-win-x64.zip` | ~30 MB |
+| **torch（GPU 版）** | <https://mirrors.aliyun.com/pytorch-wheels/cu124/> → 选 `torch-2.6.0+cu124-cp311-cp311-win_amd64.whl` | 任选其一：`<仓库>\.tools\` · `%USERPROFILE%\Downloads\` · 仓库根 · 或用 `DMB_TORCH_WHEEL` 指到任意位置 | ~2.4 GB |
+
+- **文件名必须一致**：放到 `<仓库>\.tools\cache\tmp\` 的那三个，文件名要和上表**逐字相同**（脚本按名字找）。
+- **目录不用自己建**：先跑一次 `setup.cmd`（它会创建 `.tools\cache\tmp\`，也可能已经下了一部分），再把你下好的文件丢进去重跑即可。
+- **torch 的匹配要求**：Python 3.11 → `cp311`；64 位 Windows → `win_amd64`；**不要 `+cpu`**（那是纯 CPU 版）。
+- 这三样之后仍可**随时删掉**（`<仓库>\.tools\cache\tmp\` 只是下载缓存）；`<仓库>\.tools\python311`、`<仓库>\.tools\node24` 才是真正在用的运行环境。
+
+> **一个原则**：所有下载、临时文件、pip/npm 缓存都放在**项目目录** `<仓库>\.tools\` 里（不占系统盘 ✗）；不想要时整个删掉 `.tools` 即可，重跑 `setup.cmd` 会重新准备。
 
 ### 3. 获取模型（本机路线）
 

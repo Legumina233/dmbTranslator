@@ -4,6 +4,24 @@ setlocal EnableDelayedExpansion
 set HERE=%~dp0
 set LOCAL=%~dp0.
 set VENV=%LOCAL%\.venv
+
+REM ── 便携工具（Python / Node / wheel 缓存）统一放在**项目目录**里：<repo>\.tools ──
+if defined DMB_TOOLS_DIR set "DMB_TOOLS=%DMB_TOOLS_DIR%"
+if not exist "%DMB_TOOLS%" mkdir "%DMB_TOOLS%" >nul 2>nul
+REM ── 所有下载/临时/缓存也放进项目目录（不占 C 盘）：<repo>\.tools\cache ──
+set "DMB_CACHE=%DMB_TOOLS%\cache"
+if not exist "%DMB_CACHE%" mkdir "%DMB_CACHE%" >nul 2>nul
+set "TEMP=%DMB_CACHE%\tmp"
+set "TMP=%TEMP%"
+if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>nul
+REM 各类包管理器的缓存也一起搬进项目（子进程会继承这些变量）
+set "npm_config_cache=%DMB_CACHE%\npm"
+set "PIP_CACHE_DIR=%DMB_CACHE%\pip"
+set "PYTHONPYCACHEPREFIX=%DMB_CACHE%\pycache"
+set "XDG_CACHE_HOME=%DMB_CACHE%"
+if not exist "%DMB_CACHE%\npm" mkdir "%DMB_CACHE%\npm" >nul 2>nul
+if not exist "%DMB_CACHE%\pip" mkdir "%DMB_CACHE%\pip" >nul 2>nul
+
 set PY=%VENV%\Scripts\python.exe
 
 REM ══════════════════════════════════════════════════════════════════════
@@ -42,7 +60,7 @@ call :step_python   || goto :fail
 call :step_torch    || goto :fail
 call :step_deps     || goto :fail
 call :step_weights
-call :step_frontend
+call :step_frontend || goto :fail
 call :step_host     || goto :fail
 call :step_ollama
 call :cleanup
@@ -66,7 +84,7 @@ if defined DMB_TORCH_WHEEL if exist "%DMB_TORCH_WHEEL%" (
   echo         找到本地 wheel（DMB_TORCH_WHEEL）：%DMB_TORCH_WHEEL%
   "%PY%" -m pip install --force-reinstall --no-deps --no-index "%DMB_TORCH_WHEEL%" && exit /b 0
 )
-if not defined DMB_TOOLS set "DMB_TOOLS=%LOCALAPPDATA%\dmbTranslator\tools"
+if not defined DMB_TOOLS set "DMB_TOOLS=%LOCAL%\.tools"
 for /f "delims=" %%W in ('dir /b /a-d "%DMB_TOOLS%\torch-*.whl" 2^>nul') do (
   echo         找到本地 wheel：%%W
   "%PY%" -m pip install --force-reinstall --no-deps --no-index "%DMB_TOOLS%\%%W" && exit /b 0
@@ -130,8 +148,8 @@ REM ── 5/6 的前置：没有 Node 就自己装一份便携版（只本次运行加入 PATH，不动系统
 if defined DMB_SKIP_FRONTEND exit /b 0
 if not defined DMB_NPM_REGISTRY set "DMB_NPM_REGISTRY=https://registry.npmmirror.com"
 set "npm_config_registry=%DMB_NPM_REGISTRY%"
-if exist "%LOCALAPPDATA%\dmbTranslator\tools\node24\node.exe" (
-  set "PATH=%LOCALAPPDATA%\dmbTranslator\tools\node24;%PATH%"
+if exist "%DMB_TOOLS%\node24\node.exe" (
+  set "PATH=%DMB_TOOLS%\node24;%PATH%"
   exit /b 0
 )
 if defined DMB_NODE if exist "%DMB_NODE%" (
@@ -142,7 +160,7 @@ where node >nul 2>nul && exit /b 0
 echo [5/6] 没有检测到 Node，自动下载便携版 Node 24（约 30 MB，解压到用户目录，不改系统 PATH）...
 set "DMB_NODE_VER=v24.21.0"
 set "DMB_NODE_ZIP=%TEMP%\node-%DMB_NODE_VER%-win-x64.zip"
-set "DMB_NODE_DST=%LOCALAPPDATA%\dmbTranslator\tools\node24"
+set "DMB_NODE_DST=%DMB_TOOLS%\node24"
 if not exist "%DMB_NODE_ZIP%" powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://npmmirror.com/mirrors/node/%DMB_NODE_VER%/node-%DMB_NODE_VER%-win-x64.zip' -OutFile '%DMB_NODE_ZIP%' -UseBasicParsing } catch { exit 1 }"
 if not exist "%DMB_NODE_ZIP%" powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://nodejs.org/dist/%DMB_NODE_VER%/node-%DMB_NODE_VER%-win-x64.zip' -OutFile '%DMB_NODE_ZIP%' -UseBasicParsing } catch { exit 1 }"
 if not exist "%DMB_NODE_ZIP%" (
@@ -193,15 +211,42 @@ exit /b 0
 
 :ensure_python
 if defined BASE call :try_python "%BASE%" && goto :eof
-set "DMB_TOOLS=%LOCALAPPDATA%\dmbTranslator\tools"
+set "DMB_TOOLS=%LOCAL%\.tools"
 if exist "%DMB_TOOLS%\python311\python.exe" call :try_python "%DMB_TOOLS%\python311\python.exe" && goto :eof
 for /f "delims=" %%P in ('where python 2^>nul') do call :try_python "%%P" && goto :eof
 py -3.11 -c "import sys, venv" >nul 2>nul && set "BASE=py" && goto :eof
 echo.
-echo [0/6] 本机没有可用的 Python，将自动下载官方 Python 3.11
+echo [0/6] 本机没有可用的 Python，将下载免安装版 Python 3.11（失败才回落官方安装器）
 echo        位置：%DMB_TOOLS%\python311   （仅当前用户，不改系统 PATH）
+REM ── 优先用"免安装 zip 版"Python：官方 .exe 安装器在静默模式下会**假成功**（退 0 但不装任何文件）──
+set "DMB_PYZIP=%TEMP%\dmb-python-3.11.9.nupkg"
+set "DMB_PYDST=%DMB_TOOLS%\python311"
+if not exist "%DMB_PYDST%\python.exe" (
+  echo         下载免安装版 Python（nuget 官方包，约 25MB，无安装器、无需提权）...
+  if not exist "%DMB_PYZIP%" powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://globalcdn.nuget.org/packages/python.3.11.9.nupkg' -OutFile '%DMB_PYZIP%' -UseBasicParsing } catch { exit 1 }"
+  if exist "%DMB_PYZIP%" (
+    for %%A in ("%DMB_PYZIP%") do set "DMB_PYSZ=%%~zA"
+    if not defined DMB_PYSZ set "DMB_PYSZ=0"
+    if 1==1 (
+      copy /y "%DMB_PYZIP%" "%TEMP%\dmb-python311.zip" >nul
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "$t=Join-Path $env:TEMP 'dmb-py311-x'; if (Test-Path $t) { Remove-Item $t -Recurse -Force }; Expand-Archive -Path (Join-Path $env:TEMP 'dmb-python311.zip') -DestinationPath $t -Force; $inner = Join-Path $t 'tools'; if (-not (Test-Path (Join-Path $inner 'python.exe'))) { $inner = $t }; if (Test-Path '%DMB_PYDST%') { Remove-Item '%DMB_PYDST%' -Recurse -Force }; Move-Item $inner '%DMB_PYDST%' -Force; Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue"
+      if exist "%DMB_PYDST%\python.exe" (
+        call :try_python "%DMB_PYDST%\python.exe"
+        if not errorlevel 1 ( echo         免安装版 Python 已就绪：%BASE% & exit /b 0 )
+      )
+    )
+  )
+  echo         免安装版没成功，改走官方安装器兜底...
+)
 set "DMB_PYEXE=%TEMP%\dmb-python-3.11.9-amd64.exe"
 if not exist "%DMB_PYEXE%" powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '%DMB_PYEXE%' -UseBasicParsing } catch { exit 1 }"
+for %%A in ("%DMB_PYEXE%") do set "DMB_PYSZ=%%~zA"
+if not defined DMB_PYSZ set "DMB_PYSZ=0"
+if %DMB_PYSZ% LSS 5000000 (
+  echo         下载不完整（%DMB_PYSZ% 字节，正常约 25MB），改用国内镜像重试...
+  del /f /q "%DMB_PYEXE%" >nul 2>nul
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://mirrors.huaweicloud.com/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '%DMB_PYEXE%' -UseBasicParsing } catch { exit 1 }"
+)
 if not exist "%DMB_PYEXE%" (
   echo [FAIL] 自动下载失败。请手动安装 Python 3.11：https://www.python.org/downloads/
   echo        安装时选 "Install for me only"；或用 DMB_PYTHON 指向已有的 python.exe。
@@ -209,8 +254,17 @@ if not exist "%DMB_PYEXE%" (
 )
 echo        正在静默安装（约 1 分钟）...
 "%DMB_PYEXE%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 TargetDir="%DMB_TOOLS%\python311"
+set "DMB_PYRC=%ERRORLEVEL%"
+echo         安装器退出码 %DMB_PYRC%；等待落盘（最多 120 秒）...
+set "DMB_PYWAIT=0"
+:dmb_py_wait
+if exist "%DMB_TOOLS%\python311\python.exe" goto :dmb_py_ready
+timeout /t 5 /nobreak >nul 2>nul
+set /a DMB_PYWAIT+=5
+if %DMB_PYWAIT% LSS 120 goto :dmb_py_wait
+:dmb_py_ready
 if not exist "%DMB_TOOLS%\python311\python.exe" (
-  echo [FAIL] 安装未完成：%DMB_TOOLS%\python311\python.exe 不存在
+  echo [FAIL] 安装未完成：%DMB_TOOLS%\python311\python.exe 不存在（安装器退出码 %DMB_PYRC%，等待 %DMB_PYWAIT% 秒）
   exit /b 1
 )
 call :try_python "%DMB_TOOLS%\python311\python.exe" || exit /b 1
@@ -356,10 +410,22 @@ if errorlevel 1 (
     echo        -^> 构建扩展（chromium）...
     call npm run build:extension:chromium
     if errorlevel 1 (
-      echo [5/6] [WARN] 扩展构建失败。不影响本机服务，可稍后手动重跑：
+      echo [5/6] [FAIL] 扩展未能构建 —— 没有扩展就无法使用（可用 Release 完整包里的预构建扩展，或修好后重跑）。手动重跑：
       echo          cd frontend ^&^& npm install ^&^& npm run build:extension:chromium
     ) else (
       echo        -^> 扩展已构建：frontend\apps\extension\dist-chromium
+  REM 扩展运行还需要 public\models 下的大文件（detector.ort / PP-OCRv6 / aot_inpaint / bubble，约 200MB）——仓库里不带它们，需下载
+  if not exist "%LOCAL%\frontend\public\models\detector.ort" (
+    echo         下载扩展所需的模型资源（约 200MB，首次较慢）...
+    pushd "%LOCAL%\frontend"
+    call node scripts\download-models.mjs
+    popd
+  )
+  if not exist "%LOCAL%\frontend\public\models\detector.ort" (
+    echo [5/6] [FAIL] 模型资源缺失：frontend\public\models\detector.ort
+    echo         请手动执行：cd frontend ^&^& node scripts\download-models.mjs
+    exit /b 1
+  )
       echo            到 chrome://extensions 打开"开发者模式"，用"加载已解压的扩展程序"选这个目录
     )
 )
@@ -370,7 +436,7 @@ REM ── 收尾：清除下载/安装中断留下的残留（设 DMB_SKIP_CLEANUP=1 可跳过）──
 :cleanup
 if defined DMB_SKIP_CLEANUP ( echo [清理] 已设 DMB_SKIP_CLEANUP，跳过。 & exit /b 0 )
 set "SP=%VENV%\Lib\site-packages"
-if not defined DMB_TOOLS set "DMB_TOOLS=%LOCALAPPDATA%\dmbTranslator\tools"
+if not defined DMB_TOOLS set "DMB_TOOLS=%LOCAL%\.tools"
 if not defined HF_HUB   set "HF_HUB=%USERPROFILE%\.cache\huggingface\hub"
 echo [清理] 清除下载/安装中断残留（只删没走完的碎屑，不动正常缓存）...
 REM ① pip 安装中断：site-packages 下 ~ 开头的目录/文件（pip 先解压到 ~<包名>，装成才改名）

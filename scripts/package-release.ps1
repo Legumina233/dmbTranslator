@@ -27,7 +27,7 @@ if ($IncludeLauncher) { $includeFiles += 'run\nm_host_launcher.exe' }           
 
 # ── 明确排除（即便在 include 目录里也剔掉） ─────────────────────────────
 $excludePatterns = @(
-  '\\node_modules\\', '\\\.venv\\', '\\logs\\', '\\\.cache\\', '\\artifacts\\',
+  '\\node_modules\\', '\\\.venv\\', '\\logs\\', '\\.cache\\', '\\\.tools\\', '\\artifacts\\',
   '\\run\\.*\.json$', '\\run\\.*\.log$', '\\__pycache__\\', '\\\.pytest_cache\\',
   '\\frontend\\tests\\', '\\frontend\\benchmark\\', '\\\.git\\'
 )

@@ -7,8 +7,9 @@ build/
 venv/
 
 # ── 重资产：不入库，用软链或配置指向别处 ──────────
-public/models/
-models/
+# public/models/ 已删除（根目录没有 public/；它会误伤 frontend/public/models/）
+# 只忽略仓库根的权重目录（manga-ocr 权重等）。注意：不能写成 models/（无锚点会吞掉 frontend/public/models/），也不能在规则后写行尾注释。
+/models/
 .conda/
 
 # ── 探针报告：含站点 showkey 等会话凭据，不入库 ──
@@ -34,3 +35,6 @@ run/
 
 # 打包产物（package-release.ps1 的输出 + 临时 staging）
 artifacts/
+
+# 便携工具（setup.cmd 自动下载的 Python / Node / wheel 缓存）
+.tools/
