@@ -386,6 +386,11 @@ exit /b 0
 
 REM ── 5/5 前端依赖（可选）─────────────────────────────────────────────
 :step_frontend
+REM ★ 完整包路线：已带预构建扩展（且有产物、但没带前端源码）→ 跳过 Node 与构建，只做产物/资源校验
+if exist "%LOCAL%\frontend\apps\extension\dist-chromium\content.js" if not exist "%LOCAL%\frontend\package.json" (
+  echo [5/6] 包里已带预构建扩展（无前端源码）—— 跳过 Node 与构建，仅校验产物。
+  goto :step_frontend_assets
+)
 call :ensure_node
 if defined DMB_SKIP_FRONTEND (
   echo [5/6] 已设 DMB_SKIP_FRONTEND，跳过前端依赖。
@@ -411,9 +416,15 @@ if errorlevel 1 (
     call npm run build:extension:chromium
     if errorlevel 1 (
       echo [5/6] [FAIL] 扩展未能构建 —— 没有扩展就无法使用（可用 Release 完整包里的预构建扩展，或修好后重跑）。手动重跑：
+    exit /b 1
       echo          cd frontend ^&^& npm install ^&^& npm run build:extension:chromium
     ) else (
       echo        -^> 扩展已构建：frontend\apps\extension\dist-chromium
+:step_frontend_assets
+  if defined DMB_SKIP_MODELS (
+    echo         已设 DMB_SKIP_MODELS，跳过模型资源校验。
+    exit /b 0
+  )
   REM 扩展运行还需要 public\models 下的大文件（detector.ort / PP-OCRv6 / aot_inpaint / bubble，约 200MB）——仓库里不带它们，需下载
   if not exist "%LOCAL%\frontend\public\models\detector.ort" (
     echo         下载扩展所需的模型资源（约 200MB，首次较慢）...
