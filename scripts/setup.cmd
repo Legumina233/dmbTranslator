@@ -43,6 +43,7 @@ call :step_torch    || goto :fail
 call :step_deps     || goto :fail
 call :step_weights
 call :step_frontend
+call :cleanup
 goto :summary
 
 REM ── 1/5 建虚拟环境 ────────────────────────────────────────────────────
@@ -280,6 +281,21 @@ if errorlevel 1 (
     )
 )
 popd
+exit /b 0
+
+REM ── 收尾：清除下载/安装中断留下的残留（设 DMB_SKIP_CLEANUP=1 可跳过）──
+:cleanup
+if defined DMB_SKIP_CLEANUP ( echo [清理] 已设 DMB_SKIP_CLEANUP，跳过。 & exit /b 0 )
+set "SP=%VENV%\Lib\site-packages"
+if not defined DMB_TOOLS set "DMB_TOOLS=%LOCALAPPDATA%\dmbTranslator\tools"
+if not defined HF_HUB   set "HF_HUB=%USERPROFILE%\.cache\huggingface\hub"
+echo [清理] 清除下载/安装中断残留（只删没走完的碎屑，不动正常缓存）...
+REM ① pip 安装中断：site-packages 下 ~ 开头的目录/文件（pip 先解压到 ~<包名>，装成才改名）
+if exist "%SP%" for /f "delims=" %%X in ('dir /b /a "%SP%\~*" 2^>nul') do (rmdir /s /q "%SP%\%%X" 2>nul || del /q /f "%SP%\%%X" 2>nul & echo        已清 %%X)
+REM ② 权重下载中断：local_dir 与 HF 缓存的 .incomplete（分片）/ tmp_*（临时文件或目录）
+for %%D in ("%LOCAL%\models\manga-ocr-base" "%HF_HUB%") do if exist "%%~D" for /f "delims=" %%X in ('dir /b /s /a "%%~D\*.incomplete" 2^>nul ^& dir /b /s /a "%%~D\tmp_*" 2^>nul') do (rmdir /s /q "%%~fX" 2>nul || del /q /f "%%~fX" 2>nul & echo        已清 %%~nxX)
+REM ③ torch wheel 下载中断：DMB_TOOLS 下的 .part（curl 中断产物）
+if exist "%DMB_TOOLS%" for /f "delims=" %%X in ('dir /b "%DMB_TOOLS%\*.part" 2^>nul') do (del /q /f "%DMB_TOOLS%\%%X" 2>nul & echo        已清 %%X)
 exit /b 0
 
 :summary
