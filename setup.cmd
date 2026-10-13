@@ -7,11 +7,19 @@ set VENV=%LOCAL%\.venv
 
 REM ── 便携工具（Python / Node / wheel 缓存）统一放在**项目目录**里：<repo>\.tools ──
 if defined DMB_TOOLS_DIR set "DMB_TOOLS=%DMB_TOOLS_DIR%"
+REM ★ 自足的根路径推导（不依赖后面才定义的 LOCAL —— 之前的 bug 就是这里没定义就用了）
+set "DMB_ROOT=%~dp0"
+if "%DMB_ROOT:~-1%"=="\" set "DMB_ROOT=%DMB_ROOT:~0,-1%"
+if defined DMB_TOOLS_DIR set "DMB_TOOLS=%DMB_TOOLS_DIR%"
+if not defined DMB_TOOLS set "DMB_TOOLS=%DMB_ROOT%\.tools"
+if not defined DMB_TOOLS ( echo [0/6] [FAIL] 内部错误：DMB_TOOLS 未定义 & exit /b 1 )
 if not exist "%DMB_TOOLS%" mkdir "%DMB_TOOLS%" >nul 2>nul
 REM ── 所有下载/临时/缓存也放进项目目录（不占 C 盘）：<repo>\.tools\cache ──
 set "DMB_CACHE=%DMB_TOOLS%\cache"
 if not exist "%DMB_CACHE%" mkdir "%DMB_CACHE%" >nul 2>nul
 set "TEMP=%DMB_CACHE%\tmp"
+set "DMB_PYUNZIP=%DMB_CACHE%\tmp\dmb-py311-x"
+set "DMB_PYZIPCOPY=%DMB_CACHE%\tmp\dmb-python311.zip"
 set "TMP=%TEMP%"
 if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>nul
 REM 各类包管理器的缓存也一起搬进项目（子进程会继承这些变量）
@@ -52,7 +60,7 @@ echo   独立 Python 环境：%VENV%
 echo   不会污染你系统里的其他 Python 项目。
 echo.
 echo   [1/6] 建虚拟环境   [2/6] 装 torch   [3/6] 装其余依赖
-echo   [4/6] 下模型权重   [5/6] 前端依赖（可选）
+echo   [4/6] 下模型权重   [5/6] 前端依赖（有源码才构建）
 echo.
 
 call :ensure_python || goto :fail
@@ -84,7 +92,7 @@ if defined DMB_TORCH_WHEEL if exist "%DMB_TORCH_WHEEL%" (
   echo         找到本地 wheel（DMB_TORCH_WHEEL）：%DMB_TORCH_WHEEL%
   "%PY%" -m pip install --force-reinstall --no-deps --no-index "%DMB_TORCH_WHEEL%" && exit /b 0
 )
-if not defined DMB_TOOLS set "DMB_TOOLS=%LOCAL%\.tools"
+if not defined DMB_TOOLS set "DMB_TOOLS=%DMB_ROOT%\.tools"
 for /f "delims=" %%W in ('dir /b /a-d "%DMB_TOOLS%\torch-*.whl" 2^>nul') do (
   echo         找到本地 wheel：%%W
   "%PY%" -m pip install --force-reinstall --no-deps --no-index "%DMB_TOOLS%\%%W" && exit /b 0
@@ -211,7 +219,7 @@ exit /b 0
 
 :ensure_python
 if defined BASE call :try_python "%BASE%" && goto :eof
-set "DMB_TOOLS=%LOCAL%\.tools"
+set "DMB_TOOLS=%DMB_ROOT%\.tools"
 if exist "%DMB_TOOLS%\python311\python.exe" call :try_python "%DMB_TOOLS%\python311\python.exe" && goto :eof
 for /f "delims=" %%P in ('where python 2^>nul') do call :try_python "%%P" && goto :eof
 py -3.11 -c "import sys, venv" >nul 2>nul && set "BASE=py" && goto :eof
@@ -229,7 +237,7 @@ if not exist "%DMB_PYDST%\python.exe" (
     if not defined DMB_PYSZ set "DMB_PYSZ=0"
     if 1==1 (
       copy /y "%DMB_PYZIP%" "%TEMP%\dmb-python311.zip" >nul
-      powershell -NoProfile -ExecutionPolicy Bypass -Command "$t=Join-Path $env:TEMP 'dmb-py311-x'; if (Test-Path $t) { Remove-Item $t -Recurse -Force }; Expand-Archive -Path (Join-Path $env:TEMP 'dmb-python311.zip') -DestinationPath $t -Force; $inner = Join-Path $t 'tools'; if (-not (Test-Path (Join-Path $inner 'python.exe'))) { $inner = $t }; if (Test-Path '%DMB_PYDST%') { Remove-Item '%DMB_PYDST%' -Recurse -Force }; Move-Item $inner '%DMB_PYDST%' -Force; Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue"
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "$t='%DMB_PYUNZIP%'; if (Test-Path $t) { Remove-Item $t -Recurse -Force }; Expand-Archive -Path (Join-Path $env:TEMP 'dmb-python311.zip') -DestinationPath $t -Force; $inner = Join-Path $t 'tools'; if (-not (Test-Path (Join-Path $inner 'python.exe'))) { $inner = $t }; if (Test-Path '%DMB_PYDST%') { Remove-Item '%DMB_PYDST%' -Recurse -Force }; Move-Item $inner '%DMB_PYDST%' -Force; Remove-Item $t -Recurse -Force -ErrorAction SilentlyContinue"
       if exist "%DMB_PYDST%\python.exe" (
         call :try_python "%DMB_PYDST%\python.exe"
         if not errorlevel 1 ( echo         免安装版 Python 已就绪：%BASE% & exit /b 0 )
@@ -384,7 +392,7 @@ if errorlevel 1 (
 )
 exit /b 0
 
-REM ── 5/5 前端依赖（可选）─────────────────────────────────────────────
+REM ── 5/6 前端依赖（有源码才构建）─────────────────────────────────────────────
 :step_frontend
 REM ★ 完整包路线：已带预构建扩展（且有产物、但没带前端源码）→ 跳过 Node 与构建，只做产物/资源校验
 if exist "%LOCAL%\frontend\apps\extension\dist-chromium\content.js" if not exist "%LOCAL%\frontend\package.json" (
@@ -405,7 +413,8 @@ if not defined NODEVER set NODEVER=?
 echo [5/6] 检测到 Node %NODEVER%。上游 engines 要求 Node 24；Node 22 能装但会有 EBADENGINE 警告。
 echo        -^> 安装前端依赖（首次约 3~8 分钟）...
 pushd "%LOCAL%\frontend"
-call npm install
+set "npm_config_python=%DMB_TOOLS%\python311\python.exe"
+call npm install --ignore-scripts
 if errorlevel 1 (
   echo [5/6] [WARN] npm install 失败。不影响本机服务，可稍后手动重跑。
   echo        若报 EBUSY —— 那是受限沙箱下的已知问题，改用：npm install --ignore-scripts
@@ -447,7 +456,7 @@ REM ── 收尾：清除下载/安装中断留下的残留（设 DMB_SKIP_CLEANUP=1 可跳过）──
 :cleanup
 if defined DMB_SKIP_CLEANUP ( echo [清理] 已设 DMB_SKIP_CLEANUP，跳过。 & exit /b 0 )
 set "SP=%VENV%\Lib\site-packages"
-if not defined DMB_TOOLS set "DMB_TOOLS=%LOCAL%\.tools"
+if not defined DMB_TOOLS set "DMB_TOOLS=%DMB_ROOT%\.tools"
 if not defined HF_HUB   set "HF_HUB=%USERPROFILE%\.cache\huggingface\hub"
 echo [清理] 清除下载/安装中断残留（只删没走完的碎屑，不动正常缓存）...
 REM ① pip 安装中断：site-packages 下 ~ 开头的目录/文件（pip 先解压到 ~<包名>，装成才改名）
@@ -469,26 +478,28 @@ echo    scripts\start_server.cmd       启动本机服务 11436（OCR + 翻译）
 echo    scripts\start_ollama.cmd       启动 Ollama 独立服务 11437（模型控制面板）
 echo    scripts\test_ocr.cmd           冒烟测试（需服务端已启动）
 echo.
-echo  构建扩展（需 Node 24）：
+echo  扩展构建（[5/6] 已自动完成）；完整包自带预构建产物。手动重跑：
 echo    cd frontend
 echo    npm run typecheck:extension
 echo    npm run build:extension:chromium
 echo.
 echo  想用「本地模型」翻译路线，需要本地有 ollama 与模型：
-echo    ollama pull sakura-14b
-echo    ollama pull qwen3.5:4b
+echo    （用你已部署的模型即可，无需按名字拉取）
+echo 
 echo    （自定义 Modelfile 见 server\modelfiles\，详见 docs\ARCHITECTURE.md）
 echo.
-echo  想让扩展能「点按钮」起停本机服务，再装一次 Native Messaging 宿主：
+echo  Native Messaging 宿主（[6/6] 已自动注册并自校验；手动重跑：
 echo    python scripts\install_native_host.py
 echo.
 echo  更多说明见 README.md 与 docs\ 下的三份文档。
 echo ============================================================
 echo.
 endlocal
+if not defined DMB_NO_PAUSE ( echo. & echo 按任意键关闭窗口... & pause >nul )
 exit /b 0
 
 :fail
+if not defined DMB_NO_PAUSE ( echo. & echo 按任意键关闭窗口... & pause >nul )
 echo.
 echo ============================================================
 echo  安装中断。修掉上面的 [FAIL] 后重跑本脚本 ——
