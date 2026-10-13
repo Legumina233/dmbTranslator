@@ -143,7 +143,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Export ocr_ar_48px.ckpt to ONNX")
     parser.add_argument(
         "--repo-root",
-        default=r"D:\Downloads\manga_translate\tmp_manga_image_translator",
+        default=r"tmp_manga_image_translator",
         help="Path to manga-image-translator repository root",
     )
     parser.add_argument(
@@ -158,7 +158,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default=r"D:\Downloads\manga_translate\public\models\ocr.onnx",
+        default=r"public\models\ocr.onnx",
         help="Output ONNX path",
     )
     parser.add_argument("--height", type=int, default=48)

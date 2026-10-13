@@ -31,3 +31,6 @@ desktop.ini
 
 # 运行时状态（管家开关等），不入库
 run/
+
+# 打包产物（package-release.ps1 的输出 + 临时 staging）
+artifacts/

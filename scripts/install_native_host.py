@@ -98,7 +98,7 @@ def run(cmd, cwd=None, timeout=600):
 def resolve_python():
     for cand in (
         os.path.join(REPO, ".venv", "Scripts", "python.exe"),  # 仓库自己的 .venv 优先（换盘/换目录/换机器都对；不再被外部环境变量带跑）
-        # scripts/setup.cmd 建的虚拟环境在**仓库根** .venv（不在 server/ 下）
+        # setup.cmd 建的虚拟环境在**仓库根** .venv（不在 server/ 下）
         os.path.join(REPO, ".venv", "Scripts", "python.exe"),
         # 兼容早期把 venv 建在 server/ 下的布局
         os.path.join(REPO, "server", ".venv", "Scripts", "python.exe"),
@@ -325,5 +325,44 @@ def main():
     return 0
 
 
+def _self_check():
+    """注册后自校验：宿主 exe 必须真实存在、allowed_origins 非空、注册表必须指向本仓库。
+    没有这一步，"弹窗按钮点不动"就成了隐性坏状态（装完了却不知道哪里不对）。
+    """
+    import json as _json
+    import winreg
+    ok = True
+    try:
+        with open(MANIFEST, "r", encoding="utf-8") as fh:
+            mf = _json.load(fh)
+    except Exception as e:
+        log("\u2716 自校验：读不到宿主清单（%s）" % e)
+        return False
+    exe = mf.get("path") or ""
+    orgs = mf.get("allowed_origins") or []
+    if not exe or not os.path.exists(exe):
+        log("\u2716 自校验：宿主清单里的 path 不存在 -> %s" % exe)
+        ok = False
+    if not orgs:
+        log("\u2716 自校验：allowed_origins 为空（扩展 ID 没写进去）")
+        ok = False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Google\Chrome\NativeMessagingHosts\com.dmb.translator") as k:
+            reg = winreg.QueryValueEx(k, "")[0]
+        if os.path.normcase(os.path.abspath(reg)) != os.path.normcase(os.path.abspath(MANIFEST)):
+            log("\u2716 自校验：注册表指向了别处 -> %s" % reg)
+            ok = False
+    except Exception as e:
+        log("\u2716 自校验：注册表读不到（%s）" % e)
+        ok = False
+    if ok:
+        log("\u2714 自校验通过：宿主 exe 存在、allowed_origins 非空、注册表指向本仓库")
+    return ok
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _code = main()
+    if _code == 0 and not _self_check():
+        _code = 2
+    sys.exit(_code)

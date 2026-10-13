@@ -2,7 +2,7 @@
 chcp 936 >nul
 setlocal EnableDelayedExpansion
 set HERE=%~dp0
-set LOCAL=%HERE%..
+set LOCAL=%~dp0.
 set VENV=%LOCAL%\.venv
 set PY=%VENV%\Scripts\python.exe
 
@@ -33,8 +33,8 @@ echo ============================================================
 echo   独立 Python 环境：%VENV%
 echo   不会污染你系统里的其他 Python 项目。
 echo.
-echo   [1/5] 建虚拟环境   [2/5] 装 torch   [3/5] 装其余依赖
-echo   [4/5] 下模型权重   [5/5] 前端依赖（可选）
+echo   [1/6] 建虚拟环境   [2/6] 装 torch   [3/6] 装其余依赖
+echo   [4/6] 下模型权重   [5/6] 前端依赖（可选）
 echo.
 
 call :ensure_python || goto :fail
@@ -43,11 +43,13 @@ call :step_torch    || goto :fail
 call :step_deps     || goto :fail
 call :step_weights
 call :step_frontend
+call :step_host     || goto :fail
+call :step_ollama
 call :cleanup
 goto :summary
 
 REM ── 1/5 建虚拟环境 ────────────────────────────────────────────────────
-REM ── [0/5] 保证有一个"能用的" Python（没有就自动获取便携版） ──────────────
+REM ── [0/6] 保证有一个"能用的" Python（没有就自动获取便携版） ──────────────
 :torch_local
 REM ★ 已经就绪就**什么都不做**：本地 wheel 离线重装虽然不用下载，但也要白等好几分钟。
 REM   判定：DMB_TORCH=cpu 时只要能 import；否则要求 import 成功且 CUDA 可用（这样"CPU 版 → GPU 版"仍然会被纠正）。
@@ -59,14 +61,26 @@ if /I "%DMB_TORCH%"=="cpu" (
 REM 优先本地 wheel / 国内镜像安装 torch。官方 download.pytorch.org 在部分网络下会无声挂死
 REM （真机卡过 33 分钟 / 16 分钟：CPU 0%、缓存零增长）。返回 0 = 已装好，调用方直接 goto :eof。
 if /I "%DMB_TORCH%"=="cpu" exit /b 1
+REM ★ 也可以显式指定 wheel：set DMB_TORCH_WHEEL=<完整路径>（最优先）
+if defined DMB_TORCH_WHEEL if exist "%DMB_TORCH_WHEEL%" (
+  echo         找到本地 wheel（DMB_TORCH_WHEEL）：%DMB_TORCH_WHEEL%
+  "%PY%" -m pip install --force-reinstall --no-deps --no-index "%DMB_TORCH_WHEEL%" && exit /b 0
+)
 if not defined DMB_TOOLS set "DMB_TOOLS=%LOCALAPPDATA%\dmbTranslator\tools"
 for /f "delims=" %%W in ('dir /b /a-d "%DMB_TOOLS%\torch-*.whl" 2^>nul') do (
   echo         找到本地 wheel：%%W
   "%PY%" -m pip install --force-reinstall --no-deps --no-index "%DMB_TOOLS%\%%W" && exit /b 0
 )
-for /f "delims=" %%W in ('dir /b /a-d "E:\AI\tools\torch-*.whl" 2^>nul') do (
+for /f "delims=" %%W in ('dir /b /a-d "%USERPROFILE%\Downloads\torch-*.whl" 2^>nul') do (
+  echo         找到本地 wheel（下载文件夹）：%%W
+  "%PY%" -m pip install --force-reinstall --no-deps --no-index "%USERPROFILE%\Downloads\%%W" && exit /b 0
+)
+for /f "delims=" %%W in ('dir /b /a-d "%~dp0torch-*.whl" 2^>nul') do (
+  echo         找到本地 wheel（仓库根）：%%W
+  "%PY%" -m pip install --force-reinstall --no-deps --no-index "%~dp0%%W" && exit /b 0
+)
+if 1==0 (
   echo         找到本地 wheel：%%W
-  "%PY%" -m pip install --force-reinstall --no-deps --no-index "E:\AI\tools\%%W" && exit /b 0
 )
 for /f "delims=" %%W in ('dir /b /a-d "%USERPROFILE%\Downloads\torch-*.whl" 2^>nul') do (
   echo         找到本地 wheel：%%W
@@ -94,6 +108,89 @@ echo         本地没有 wheel，改试国内 pytorch 轮子镜像...
 "%PY%" -m pip install torch --force-reinstall --no-deps --no-index -f https://mirrors.aliyun.com/pytorch-wheels/cu124/ --timeout 60 --retries 10 && exit /b 0
 exit /b 1
 
+REM ── 6/6 注册本机宿主（扩展弹窗里的起停按钮依赖它）──────────────────────
+:step_host
+echo [6/6] 注册本机宿主（浏览器里弹窗的「起停服务」按钮需要它）...
+if not exist "%LOCAL%\run\nm_host_launcher.exe" (
+  echo         没有现成的宿主 exe，先确保 PyInstaller 可用...
+  "%PY%" -c "import PyInstaller" >nul 2>nul || "%PY%" -m pip install pyinstaller -i "%DMB_PIP_MIRROR%" --timeout 60 --retries 10
+)
+"%PY%" "%LOCAL%\scripts\install_native_host.py"
+if errorlevel 1 (
+  echo [6/6] [FAIL] 宿主注册失败（原因见上面的输出）。
+  echo        可修好后手动重跑：
+  echo          "%PY%" "%LOCAL%\scripts\install_native_host.py"
+  exit /b 1
+)
+echo [6/6] 宿主已注册，并通过自校验（exe 存在 / allowed_origins 非空 / 注册表指向本仓库）。
+exit /b 0
+
+REM ── 5/6 的前置：没有 Node 就自己装一份便携版（只本次运行加入 PATH，不动系统 PATH）──
+:ensure_node
+if defined DMB_SKIP_FRONTEND exit /b 0
+if not defined DMB_NPM_REGISTRY set "DMB_NPM_REGISTRY=https://registry.npmmirror.com"
+set "npm_config_registry=%DMB_NPM_REGISTRY%"
+if exist "%LOCALAPPDATA%\dmbTranslator\tools\node24\node.exe" (
+  set "PATH=%LOCALAPPDATA%\dmbTranslator\tools\node24;%PATH%"
+  exit /b 0
+)
+if defined DMB_NODE if exist "%DMB_NODE%" (
+  for %%D in ("%DMB_NODE%") do set "PATH=%%~dpD;%PATH%"
+  exit /b 0
+)
+where node >nul 2>nul && exit /b 0
+echo [5/6] 没有检测到 Node，自动下载便携版 Node 24（约 30 MB，解压到用户目录，不改系统 PATH）...
+set "DMB_NODE_VER=v24.21.0"
+set "DMB_NODE_ZIP=%TEMP%\node-%DMB_NODE_VER%-win-x64.zip"
+set "DMB_NODE_DST=%LOCALAPPDATA%\dmbTranslator\tools\node24"
+if not exist "%DMB_NODE_ZIP%" powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://npmmirror.com/mirrors/node/%DMB_NODE_VER%/node-%DMB_NODE_VER%-win-x64.zip' -OutFile '%DMB_NODE_ZIP%' -UseBasicParsing } catch { exit 1 }"
+if not exist "%DMB_NODE_ZIP%" powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://nodejs.org/dist/%DMB_NODE_VER%/node-%DMB_NODE_VER%-win-x64.zip' -OutFile '%DMB_NODE_ZIP%' -UseBasicParsing } catch { exit 1 }"
+if not exist "%DMB_NODE_ZIP%" (
+  echo [5/6] [WARN] Node 下载失败。本机服务不受影响；扩展可改用 Release 包里的 zip。
+  exit /b 1
+)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$tmp='%DMB_NODE_DST%_tmp'; if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }; Expand-Archive -Path '%DMB_NODE_ZIP%' -DestinationPath $tmp -Force; $inner=(Get-ChildItem $tmp -Directory | Select-Object -First 1).FullName; if (Test-Path '%DMB_NODE_DST%') { Remove-Item '%DMB_NODE_DST%' -Recurse -Force }; Move-Item $inner '%DMB_NODE_DST%' -Force; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue"
+if not exist "%DMB_NODE_DST%\node.exe" (
+  echo [5/6] [WARN] Node 解压失败。扩展可改用 Release 包里的 zip。
+  exit /b 1
+)
+set "PATH=%DMB_NODE_DST%;%PATH%"
+echo [5/6] 便携 Node 就绪：%DMB_NODE_DST%
+exit /b 0
+
+REM ── 7/7 配置 Ollama（只探测 + 问一次 + 记住；不依赖用户预先设过任何变量）──
+:step_ollama
+echo [7/7] 配置 Ollama（本机路线需要；只用云端整图翻译可跳过）...
+set "FOUND_EXE="
+set "FOUND_MODELS="
+for /f "tokens=1,* delims==" %%A in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCAL%\scripts\find-ollama.ps1" 2^>nul') do (
+  if /I "%%A"=="EXE" set "FOUND_EXE=%%B"
+  if /I "%%A"=="MODELS" set "FOUND_MODELS=%%B"
+)
+if defined FOUND_EXE ( echo         自动探测到：%FOUND_EXE% ) else ( echo         没有自动探测到 Ollama（可稍后重跑本脚本）。 )
+set "OLLAMA_INPUT="
+if defined FOUND_EXE (
+  set /p "OLLAMA_INPUT=        回车使用它，或输入新的 ollama.exe 完整路径: "
+) else (
+  set /p "OLLAMA_INPUT=        请输入 Ollama 安装目录（含 ollama.exe），或回车跳过: "
+)
+if not defined OLLAMA_INPUT set "OLLAMA_INPUT=%FOUND_EXE%"
+if not defined OLLAMA_INPUT ( echo         已跳过 Ollama 配置。 & exit /b 0 )
+if exist "%OLLAMA_INPUT%\ollama.exe" set "OLLAMA_INPUT=%OLLAMA_INPUT%\ollama.exe"
+if not exist "%OLLAMA_INPUT%" ( echo         [WARN] 找不到 %OLLAMA_INPUT%（路径不对？），已跳过。 & exit /b 0 )
+setx DMB_OLLAMA_EXE "%OLLAMA_INPUT%" >nul
+set "DMB_OLLAMA_EXE=%OLLAMA_INPUT%"
+echo         已记住 DMB_OLLAMA_EXE = %OLLAMA_INPUT%
+if defined FOUND_MODELS (
+  setx OLLAMA_MODELS "%FOUND_MODELS%" >nul
+  set "OLLAMA_MODELS=%FOUND_MODELS%"
+  echo         已记住 OLLAMA_MODELS = %FOUND_MODELS%
+) else (
+  echo         没探测到模型目录；若模型不在 %%USERPROFILE%%\.ollama\models，请自行设 OLLAMA_MODELS。
+)
+echo         提示：新开的终端 / 重启浏览器后生效；想立即生效请注销重登一次。
+exit /b 0
+
 :ensure_python
 if defined BASE call :try_python "%BASE%" && goto :eof
 set "DMB_TOOLS=%LOCALAPPDATA%\dmbTranslator\tools"
@@ -101,7 +198,7 @@ if exist "%DMB_TOOLS%\python311\python.exe" call :try_python "%DMB_TOOLS%\python
 for /f "delims=" %%P in ('where python 2^>nul') do call :try_python "%%P" && goto :eof
 py -3.11 -c "import sys, venv" >nul 2>nul && set "BASE=py" && goto :eof
 echo.
-echo [0/5] 本机没有可用的 Python，将自动下载官方 Python 3.11
+echo [0/6] 本机没有可用的 Python，将自动下载官方 Python 3.11
 echo        位置：%DMB_TOOLS%\python311   （仅当前用户，不改系统 PATH）
 set "DMB_PYEXE=%TEMP%\dmb-python-3.11.9-amd64.exe"
 if not exist "%DMB_PYEXE%" powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe' -OutFile '%DMB_PYEXE%' -UseBasicParsing } catch { exit 1 }"
@@ -145,15 +242,15 @@ if not defined BASE if defined DMB_PYTHON if exist "%DMB_PYTHON%" set BASE=%DMB_
 if not defined BASE where py >nul 2>nul && set BASE=py
 if not defined BASE where python >nul 2>nul && set BASE=python
 if not defined BASE (
-  echo [1/5] [FAIL] 找不到 Python。装一个 Python 3.11 并勾选 "Add to PATH"，然后重跑本脚本。
+  echo [1/6] [FAIL] 找不到 Python。装一个 Python 3.11 并勾选 "Add to PATH"，然后重跑本脚本。
   echo             或先设 DMB_PYTHON 指向 python.exe。
   exit /b 1
 )
 if exist "%PY%" (
-  echo [1/5] 虚拟环境已存在，跳过。
+  echo [1/6] 虚拟环境已存在，跳过。
   exit /b 0
 )
-echo [1/5] 创建虚拟环境...
+echo [1/6] 创建虚拟环境...
 if "%BASE%"=="py" (
   REM 只用 :ensure_python 选定的解释器建 venv（不再优先 py，避免和它不一致）
 ) else (
@@ -164,7 +261,7 @@ if "%BASE%"=="py" (
 "%BASE%" -m venv "%VENV%"
 )
 if not exist "%PY%" (
-  echo [1/5] [FAIL] 虚拟环境创建失败。请确认 Python 3.11 可用：python --version
+  echo [1/6] [FAIL] 虚拟环境创建失败。请确认 Python 3.11 可用：python --version
   exit /b 1
 )
 exit /b 0
@@ -176,11 +273,11 @@ if not errorlevel 1 goto :eof
 set TORCH_KIND=
 if defined DMB_TORCH set TORCH_KIND=%DMB_TORCH%
 if not defined TORCH_KIND if exist "%VENV%\.gpu" (
-  echo [2/5] 已标记为 GPU 版（%VENV%\.gpu），跳过 torch 安装。
+  echo [2/6] 已标记为 GPU 版（%VENV%\.gpu），跳过 torch 安装。
   exit /b 0
 )
 if not defined TORCH_KIND (
-  echo [2/5] torch 安装方式：
+  echo [2/6] torch 安装方式：
   echo         [1] CUDA 版（NVIDIA 显卡，推荐）  约 2.5 GB
   echo         [2] CPU 版（无独显 / 只想先跑通） 约 200 MB
   choice /c 12 /n /m "        请选择 [1/2]: "
@@ -197,26 +294,26 @@ if /i "%TORCH_KIND%"=="cpu" (
   echo gpu> "%VENV%\.gpu"
 )
 if errorlevel 1 (
-  echo [2/5] [FAIL] torch 安装失败，检查网络后重跑本脚本。
+  echo [2/6] [FAIL] torch 安装失败，检查网络后重跑本脚本。
   exit /b 1
 )
 exit /b 0
 
 REM ── 3/5 其余 OCR 依赖 ────────────────────────────────────────────────
 :step_deps
-echo [3/5] 安装其余依赖（transformers / Pillow / jaconv / loguru）...
+echo [3/6] 安装其余依赖（transformers / Pillow / jaconv / loguru）...
 "%PY%" -m pip install --upgrade pip -i "%DMB_PIP_MIRROR%" --timeout 60 --retries 10
 REM 不加 --no-deps：requirements 里的 torch>=2.0 已被第 2 步装好的版本满足（pip 不会降级成 CPU 版）；加了反而会漏掉 transformers 的 tokenizers / safetensors 等传递依赖。
 "%PY%" -m pip install -r "%LOCAL%\requirements.txt" -i "%DMB_PIP_MIRROR%" --timeout 60 --retries 10
 if errorlevel 1 (
-  echo [3/5] [FAIL] 依赖安装失败，检查网络后重跑本脚本。
+  echo [3/6] [FAIL] 依赖安装失败，检查网络后重跑本脚本。
   exit /b 1
 )
 exit /b 0
 
 REM ── 4/5 预下载 manga-ocr 权重 ────────────────────────────────────────
 :step_weights
-echo [4/5] 预下载 manga-ocr 权重（约 400 MB，首次较慢）...
+echo [4/6] 预下载 manga-ocr 权重（约 400 MB，首次较慢）...
 if exist "%LOCAL%\models\manga-ocr-base\config.json" (
   echo        已存在，跳过。
   exit /b 0
@@ -226,7 +323,7 @@ if not defined HF_ENDPOINT set HF_ENDPOINT=https://hf-mirror.com
 echo        镜像源：%HF_ENDPOINT%
 "%PY%" -c "import os,sys; from huggingface_hub import snapshot_download; snapshot_download('kha-white/manga-ocr-base', local_dir=os.path.join(r'%LOCAL%','models','manga-ocr-base')); print('ok')"
 if errorlevel 1 (
-  echo [4/5] [WARN] 权重预下载失败。不影响安装，首次 OCR 时会自动重试下载。
+  echo [4/6] [WARN] 权重预下载失败。不影响安装，首次 OCR 时会自动重试下载。
   echo        手动重试：
   echo          set HF_ENDPOINT=https://hf-mirror.com
   echo          "%PY%" -c "from huggingface_hub import snapshot_download; snapshot_download('kha-white/manga-ocr-base', local_dir=r'%LOCAL%\models\manga-ocr-base')"
@@ -235,37 +332,23 @@ exit /b 0
 
 REM ── 5/5 前端依赖（可选）─────────────────────────────────────────────
 :step_frontend
+call :ensure_node
 if defined DMB_SKIP_FRONTEND (
-  echo [5/5] 已设 DMB_SKIP_FRONTEND，跳过前端依赖。
+  echo [5/6] 已设 DMB_SKIP_FRONTEND，跳过前端依赖。
   exit /b 0
 )
 set NPM_FOUND=
 where npm >nul 2>nul && set NPM_FOUND=1
-if not defined NPM_FOUND (
-    echo [5/5] 未检测到 npm，跳过前端依赖（注意：本机服务不需要 Node）。
-    echo        只有"从源码自己构建扩展"才需要 Node 24；若你用已构建好的扩展包，
-    echo        解压后在 chrome://extensions 加载即可，与本步骤无关。
-    echo        想从源码构建时再执行：
-    echo          cd frontend
-    echo          npm install
-    echo          npm run build:extension:chromium
-)
+if not defined NPM_FOUND echo        没有检测到 Node —— 已尝试自动准备便携 Node；若仍不可用，请改用 Release 包里的 zip（本机服务不受影响）。
 set NODEVER=
 for /f "delims=" %%v in ('node --version 2^>nul') do set NODEVER=%%v
 if not defined NODEVER set NODEVER=?
-echo [5/5] 检测到 Node %NODEVER%。上游 engines 要求 Node 24；Node 22 能装但会有 EBADENGINE 警告。
-choice /c 12 /n /m "        是否现在安装前端依赖？[1=是 2=否]: "
-if errorlevel 2 (
-  echo        已跳过。之后手动执行下面两条即可：
-  echo          cd frontend
-  echo          npm install
-  exit /b 0
-)
+echo [5/6] 检测到 Node %NODEVER%。上游 engines 要求 Node 24；Node 22 能装但会有 EBADENGINE 警告。
 echo        -^> 安装前端依赖（首次约 3~8 分钟）...
 pushd "%LOCAL%\frontend"
 call npm install
 if errorlevel 1 (
-  echo [5/5] [WARN] npm install 失败。不影响本机服务，可稍后手动重跑。
+  echo [5/6] [WARN] npm install 失败。不影响本机服务，可稍后手动重跑。
   echo        若报 EBUSY —— 那是受限沙箱下的已知问题，改用：npm install --ignore-scripts
 ) else (
   echo        -^> 前端依赖就绪。
@@ -273,7 +356,7 @@ if errorlevel 1 (
     echo        -^> 构建扩展（chromium）...
     call npm run build:extension:chromium
     if errorlevel 1 (
-      echo [5/5] [WARN] 扩展构建失败。不影响本机服务，可稍后手动重跑：
+      echo [5/6] [WARN] 扩展构建失败。不影响本机服务，可稍后手动重跑：
       echo          cd frontend ^&^& npm install ^&^& npm run build:extension:chromium
     ) else (
       echo        -^> 扩展已构建：frontend\apps\extension\dist-chromium

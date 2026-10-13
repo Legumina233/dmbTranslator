@@ -44,7 +44,7 @@ Firefox：`npm run build:extension:firefox`，再在 `about:debugging#/runtime/t
 需要 **Python 3.11**。
 
 ```cmd
-scripts\setup.cmd        :: 一键安装：建 .venv → 选 torch(CUDA/CPU) → 装依赖 → 下 manga-ocr 权重 →（有 Node 时）构建扩展
+setup.cmd        :: 一键安装：建 .venv → 选 torch(CUDA/CPU) → 装依赖 → 下 manga-ocr 权重 →（有 Node 时）构建扩展
 scripts\doctor.cmd --online      :: 环境自检 + 查端口
 scripts\start_server.cmd         :: 本机服务 11436（OCR + 翻译）
 scripts\start_ollama.cmd         :: Ollama 独立服务 11437（模型控制面板）
@@ -55,7 +55,7 @@ scripts\test_ocr.cmd             :: OCR 冒烟测试
 - 无人值守 / 换源：`DMB_PYTHON` · `DMB_TORCH=cpu|cu124` · `DMB_SKIP_FRONTEND=1` · `DMB_HF_MIRROR_ENDPOINT`（权重，默认 hf-mirror）· **`DMB_PIP_MIRROR`**（pip 依赖，默认清华；想走官方就设 `https://pypi.org/simple`）。
 - 两个服务互不依赖：关掉 OCR/翻译照样能管模型；停 ollama 会先卸掉全部驻留模型再停引擎。
 > **GPU 版 torch 下载卡住怎么办**（真机遇到过：官方源无声挂死）
-> 手动下载 → 丢进 `%LOCALAPPDATA%\dmbTranslator\tools\`（或 `E:\AI\tools\`、下载文件夹），再重跑 `setup.cmd`，脚本会**自动优先用本地 wheel**：
+> 手动下载 → 丢进 `%LOCALAPPDATA%\dmbTranslator\tools\`（或下载文件夹 / 仓库根），再重跑 `setup.cmd`，脚本会**自动优先用本地 wheel**：
 > - 地址：<https://mirrors.aliyun.com/pytorch-wheels/cu124/>（国内镜像）
 > - 文件名：`torch-2.6.0+cu124-cp311-cp311-win_amd64.whl`（约 2.4 GB）
 > - 必须匹配：Python **3.11** → `cp311`；64 位 Windows → `win_amd64`；**不要** `+cpu`（那是纯 CPU 版）
@@ -92,7 +92,7 @@ Sakura 系列权重来源：
 | 翻译没反应 / 一直排队 | `scripts\doctor.cmd --online` 看 11436 / 11437 是否在跑；模型控制面板：<http://127.0.0.1:11437/> |
 | **翻译卡很久不结束** | 通用模型若带"思考模式"，会先吐几千 token 的思考过程。服务端已显式关闭思考；若仍出现，换用 Sakura 系模型 |
 | `npm install` 或构建最后一步报 `EBUSY` | 受限环境已知问题，**产物其实是好的**：用 `npm install --ignore-scripts`，并手工 `node --check <产物>.js` |
-| `setup.cmd` 首屏吐一串假的「'xxx' 不是内部或外部命令」 | 该文件必须是 **GBK 编码 + `chcp 936`**；被另存成 UTF-8 就会这样 → `git checkout -- scripts/setup.cmd` |
+| `setup.cmd` 首屏吐一串假的「'xxx' 不是内部或外部命令」 | 该文件必须是 **GBK 编码 + `chcp 936`**；被另存成 UTF-8 就会这样 → `git checkout -- setup.cmd` |
 
 日志：`logs\<模型名>\YYYY-MM-DD.log`（控制台镜像）与 **`logs/events/YYYY-MM-DD.events.jsonl`**（排障首选）。
 
@@ -120,4 +120,4 @@ Sakura 系列权重来源：
 [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [UPSTREAM.md](docs/UPSTREAM.md) · [CHANGELOG.md](docs/CHANGELOG.md)。
 脚本清单见 `scripts/`；发版打包用 `frontend/scripts/package-extensions.mjs`。
 
-> 维护者注意：`scripts\setup.cmd` **必须保持 GBK + `chcp 936`**（改成 UTF-8 会首屏假报错、中文乱码）。
+> 维护者注意：`setup.cmd` **必须保持 GBK + `chcp 936`**（改成 UTF-8 会首屏假报错、中文乱码）。

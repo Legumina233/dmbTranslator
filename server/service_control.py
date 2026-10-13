@@ -50,9 +50,6 @@ def _resolve_ollama_models_dir():
     env = os.environ.get("OLLAMA_MODELS")
     if env:
         return env
-    legacy = r"E:\AI\Ollama\OllamaModels"
-    if os.path.isdir(legacy):
-        return legacy
     home = os.environ.get("USERPROFILE") or os.path.expanduser("~")
     return os.path.join(home, ".ollama", "models")
 
@@ -215,10 +212,7 @@ def find_ollama_launcher():
     if cli:
         dirs.append(os.path.dirname(cli))
     dirs += [
-        # 作者机器的历史位置：**不存在时会被下面的 os.path.exists 直接跳过**，
         # 因此换台机器/换安装位置都不受影响。想彻底去掉，就把它删掉并用
-        # 环境变量 DMB_OLLAMA_EXE 指定你自己的 ollama.exe。
-        r"E:\AI\Ollama\Ollama",
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama"),
         r"C:\Program Files\Ollama",
     ]

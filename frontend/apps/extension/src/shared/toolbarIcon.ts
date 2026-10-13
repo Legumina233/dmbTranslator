@@ -2,7 +2,7 @@ import { getExtensionApi } from './extensionRuntime';
 
 /**
  * 工具栏图标按「本地服务是否在跑」切换：
- *   开 → icon*-on.png（来自 D:\C.ico 转换）
+ *   开 → icon*-on.png（从源图标转换而来）
  *   关 → 扩展原图标 icon*.png
  *
  * Chrome 的 action 图标不接受 .ico，所以 on 态这四个 PNG 是预先转好的，
