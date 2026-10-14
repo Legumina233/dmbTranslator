@@ -394,6 +394,7 @@ exit /b 0
 
 REM ── 5/6 前端依赖（有源码才构建）─────────────────────────────────────────────
 :step_frontend
+call :step_frontend_models || exit /b 1
 REM ★ 完整包路线：已带预构建扩展（且有产物、但没带前端源码）→ 跳过 Node 与构建，只做产物/资源校验
 if exist "%LOCAL%\frontend\apps\extension\dist-chromium\content.js" if not exist "%LOCAL%\frontend\package.json" (
   echo [5/6] 包里已带预构建扩展（无前端源码）—— 跳过 Node 与构建，仅校验产物。
@@ -413,7 +414,7 @@ if not defined NODEVER set NODEVER=?
 echo [5/6] 检测到 Node %NODEVER%。上游 engines 要求 Node 24；Node 22 能装但会有 EBADENGINE 警告。
 echo        -^> 安装前端依赖（首次约 3~8 分钟）...
 pushd "%LOCAL%\frontend"
-set "npm_config_python=%DMB_TOOLS%\python311\python.exe"
+set "PYTHON=%DMB_TOOLS%\python311\python.exe"
 call npm install --ignore-scripts
 if errorlevel 1 (
   echo [5/6] [WARN] npm install 失败。不影响本机服务，可稍后手动重跑。
@@ -507,4 +508,18 @@ echo  已完成的步骤会自动跳过，不会重复下载。
 echo ============================================================
 echo.
 endlocal
+exit /b 1
+
+:step_frontend_models
+if defined DMB_SKIP_MODELS exit /b 0
+if exist "%DMB_ROOT%\frontend\public\models\detector.ort" exit /b 0
+if not exist "%DMB_ROOT%\frontend\public\models\models.json" exit /b 0
+echo [5/6] 正在准备扩展运行所需的模型资源（约 200MB）...
+pushd "%DMB_ROOT%\frontend"
+call node scripts\download-models.mjs
+popd
+if exist "%DMB_ROOT%\frontend\public\models\detector.ort" exit /b 0
+echo [5/6] [FAIL] 缺少扩展运行所需的模型资源（detector.ort 等，约 200MB）。
+echo         请把 models.zip 解压到：%DMB_ROOT%\frontend\public\models\
+echo         （完整包 dmbTranslator-*-win64.zip 已内置这些文件，可直接用它）
 exit /b 1
