@@ -17,18 +17,18 @@ $stage = Join-Path $ART ("stage-dmbTranslator-$ver-win64")
 $includeFiles = @(
   'setup.cmd', 'requirements.txt', 'README.md', 'LICENSE', 'NOTICE', '.upstream@a5af759',
   'frontend\LICENSE', 'frontend\NOTICE', 'frontend\THIRD_PARTY_NOTICES.md'
+  'frontend\public\models\models.json'
 )
 $includeDirs = @(
   'server', 'manga-ocr', 'docs',
-  'frontend\apps\extension\dist-chromium',     # ★ 预构建扩展：用户免装 Node
-  # frontend\public\models 下的模型资产按许可证不得随包分发（见 packages\model-manifest\publication-policy.json）
+  'frontend\apps\extension\dist-chromium'
+# 注：frontend\public\models 的模型资产按许可证不得随包分发，改由 setup.cmd 的 [5/6] 从官方 Release 自动下载并校验
 )
 # scripts\ 只带用户向脚本（白名单）：开发工具已移到 dev\tools\，不进发行包
 $includeFiles += @(
   'scripts\doctor.cmd', 'scripts\doctor.py', 'scripts\find-ollama.ps1', 'scripts\install_native_host.py',
   'scripts\start_server.cmd', 'scripts\start_ollama.cmd', 'scripts\stop_server.cmd', 'scripts\stop_ollama.cmd',
   'scripts\test_ocr.cmd', 'scripts\test_ocr.py'
-  'frontend\public\models\models.json'          # ★ 只带清单（1.9KB），模型本体由 [5/6] 下载
 )
 if ($IncludeModels)   { $includeDirs += 'models' }                                    # 可选：省用户 400MB 下载
 if ($IncludeLauncher) { $includeFiles += 'run\nm_host_launcher.exe' }                 # 可选：[6/6] 编译失败时兜底
@@ -84,4 +84,3 @@ Write-Host ("zip: " + $zip + "  " + [math]::Round((Get-Item $zip).Length/1MB,1) 
 Write-Host ("SHA256SUMS.txt 已写: " + $hash)
 
 # 说明：不再产出 models.zip —— 模型资产受许可证限制，不得随发行物分发。
-# 扩展所需模型由 setup.cmd 的 [5/6] 调 download-models.mjs 从官方 Release 自动下载并校验 SHA-256。
