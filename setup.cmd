@@ -394,6 +394,7 @@ exit /b 0
 
 REM ── 5/6 前端依赖（有源码才构建）─────────────────────────────────────────────
 :step_frontend
+call :ensure_node
 call :step_frontend_models || exit /b 1
 REM ★ 完整包路线：已带预构建扩展（且有产物、但没带前端源码）→ 跳过 Node 与构建，只做产物/资源校验
 if exist "%LOCAL%\frontend\apps\extension\dist-chromium\content.js" if not exist "%LOCAL%\frontend\package.json" (
