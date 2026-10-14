@@ -21,13 +21,14 @@ $includeFiles = @(
 $includeDirs = @(
   'server', 'manga-ocr', 'docs',
   'frontend\apps\extension\dist-chromium',     # ★ 预构建扩展：用户免装 Node
-  'frontend\public\models'                      # ★ 扩展运行所需的模型资源（detector.ort 等，约 200MB）
+  # frontend\public\models 下的模型资产按许可证不得随包分发（见 packages\model-manifest\publication-policy.json）
 )
 # scripts\ 只带用户向脚本（白名单）：开发工具已移到 dev\tools\，不进发行包
 $includeFiles += @(
   'scripts\doctor.cmd', 'scripts\doctor.py', 'scripts\find-ollama.ps1', 'scripts\install_native_host.py',
   'scripts\start_server.cmd', 'scripts\start_ollama.cmd', 'scripts\stop_server.cmd', 'scripts\stop_ollama.cmd',
   'scripts\test_ocr.cmd', 'scripts\test_ocr.py'
+  'frontend\public\models\models.json'          # ★ 只带清单（1.9KB），模型本体由 [5/6] 下载
 )
 if ($IncludeModels)   { $includeDirs += 'models' }                                    # 可选：省用户 400MB 下载
 if ($IncludeLauncher) { $includeFiles += 'run\nm_host_launcher.exe' }                 # 可选：[6/6] 编译失败时兜底
@@ -82,13 +83,5 @@ $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 Write-Host ("zip: " + $zip + "  " + [math]::Round((Get-Item $zip).Length/1MB,1) + " MB")
 Write-Host ("SHA256SUMS.txt 已写: " + $hash)
 
-# ── 额外资产：仅模型资源（给源码克隆用户；解压后覆盖到 frontend\\public\\models\\）──
-$modelsSrc = Join-Path $REPO 'frontend\public\models'
-$modelsZip = Join-Path $ART ("dmbTranslator-" + $ver + "-models.zip")
-if (Test-Path $modelsSrc) {
-  if (Test-Path $modelsZip) { Remove-Item $modelsZip -Force }
-  Compress-Archive -Path (Join-Path $modelsSrc '*') -DestinationPath $modelsZip -CompressionLevel Optimal
-  $mh = (Get-FileHash $modelsZip -Algorithm SHA256).Hash.ToLower()
-  "SHA256 ($([System.IO.Path]::GetFileName($modelsZip))) = $mh" | Add-Content (Join-Path $ART 'SHA256SUMS.txt') -Encoding ASCII
-  Write-Host ("models zip: " + $modelsZip + "  " + [math]::Round((Get-Item $modelsZip).Length/1MB,1) + " MB")
-}
+# 说明：不再产出 models.zip —— 模型资产受许可证限制，不得随发行物分发。
+# 扩展所需模型由 setup.cmd 的 [5/6] 调 download-models.mjs 从官方 Release 自动下载并校验 SHA-256。
