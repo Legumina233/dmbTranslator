@@ -9,7 +9,7 @@ import {
 
 const tick = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0); });
 
-/** 真机实录格式的 showpage JSON（字段见 docs/ARCHITECTURE.md §六；imgkey 一律十六进制串）。 */
+/** 真机实录格式的 showpage JSON（字段见 dev/docs/ARCHITECTURE.md §六；imgkey 一律十六进制串）。 */
 function hexKey(n: number): string {
   return n.toString(16).padStart(10, '0');
 }

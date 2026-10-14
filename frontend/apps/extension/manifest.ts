@@ -74,7 +74,7 @@ const baseContentScripts: ContentScript[] = [
 // 已随尖刺文件一并删除（奥卡姆审查：M0 时代的观察代码，其 postMessage 上报在正式扩展里
 // **零消费者**；且它拖着 minimum_chrome_version 抬到 111）。e-hentai 的站点全局
 // （load_image / apply_json_state）经真机证实是**函数声明**、不可重定义，主世界脚本
-// 已无存在理由。恢复前请先看 docs/ARCHITECTURE.md §3.1（主世界桥的历史决策与现状）
+// 已无存在理由。恢复前请先看 dev/docs/ARCHITECTURE.md §3.1（主世界桥的历史决策与现状）
 // 与 docs/UPSTREAM.md（复用与扩展说明）。
 
 export function createExtensionManifest(target: ExtensionTarget, version: string): Manifest {

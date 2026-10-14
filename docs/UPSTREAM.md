@@ -395,7 +395,7 @@ UI 的"译图缓存 N 张"现在管的是**内存条数**，显示 `现存 / 上
 ### 5.6 新增自有能力（纯新增，登记）
 
 - **e-hentai 预取链**：`content/core/scheduler/{prefetchChain,showpageClient,prefetchExecutor}.ts`
-  —— 本项目唯一"另起一套"的核心能力（上游无对应实现）。设计与风控见 `docs/ARCHITECTURE.md` §二、§3.2。
+  —— 本项目唯一"另起一套"的核心能力（上游无对应实现）。
 - **常驻画框**：`content/core/overlay/translatedImageOverlay.ts`。
 - **诊断/日志**：`background/diagnostics/{uncaughtCapture,backgroundEventLog}.ts`、
   `content/core/telemetry/contentEventLog.ts`、`offscreen/pipelineTelemetry.ts`、

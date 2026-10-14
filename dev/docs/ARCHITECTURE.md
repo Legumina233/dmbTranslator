@@ -428,8 +428,8 @@ OCR/翻译服务上**：dmb_server 一关就管不了模型，开关与卸载状
 
 | 命令 | 覆盖 | 依赖 |
 |---|---|---|
-| `python scripts\test_pure.py` | 纯函数单测：切段、输入抽取、Sakura 官方格式、**OCR 置信度口径**、**强制卸载语义** | 零依赖 |
-| `python scripts\test_server.py` | 端到端检查：T1 健康 / T2 OCR / T3 简版翻译 / T3b requestId 回显 / T3c 事件流落盘 / T4 结构化 regions / T5 失败显式报错 | 需服务端 + Ollama |
+| `python dev\tools\test_pure.py` | 纯函数单测：切段、输入抽取、Sakura 官方格式、**OCR 置信度口径**、**强制卸载语义** | 零依赖 |
+| `python dev\tools\test_server.py` | 端到端检查：T1 健康 / T2 OCR / T3 简版翻译 / T3b requestId 回显 / T3c 事件流落盘 / T4 结构化 regions / T5 失败显式报错 | 需服务端 + Ollama |
 
 > 两个脚本都显式绕开系统代理 —— 环境里设了 `http_proxy` 而没设 `no_proxy` 时，
 > urllib 会把 `127.0.0.1` 也塞给代理，拿回一个莫名其妙的 502（踩过）。

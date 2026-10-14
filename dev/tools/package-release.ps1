@@ -1,5 +1,5 @@
 ﻿# dmbTranslator 完整包（服务端 + 预构建扩展）打包脚本
-# 用法： powershell -ExecutionPolicy Bypass -File scripts\package-release.ps1 [-IncludeModels] [-IncludeLauncher] [-SkipZip]
+# 用法： powershell -ExecutionPolicy Bypass -File dev\tools\package-release.ps1 [-IncludeModels] [-IncludeLauncher] [-SkipZip]
 # 产出： artifacts\dmbTranslator-<ver>-win64.zip  +  artifacts\SHA256SUMS.txt
 # 规则： 只带"用户需要 + setup.cmd 不能重建"的东西；排除一切可由 setup.cmd 重建或只对开发者有用的内容。
 param(
@@ -8,7 +8,7 @@ param(
   [switch]$SkipZip            # 只做 staging 与清单，不压缩（快速核对用）
 )
 $ErrorActionPreference = 'Stop'
-$REPO = Split-Path -Parent $PSScriptRoot
+$REPO = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # dev\tools\ 上溯两级 = 仓库根
 $ART  = Join-Path $REPO 'artifacts'
 $ver  = (Get-Content (Join-Path $REPO 'frontend\apps\extension\package.json') -Raw | ConvertFrom-Json).version
 $stage = Join-Path $ART ("stage-dmbTranslator-$ver-win64")
@@ -19,9 +19,15 @@ $includeFiles = @(
   'frontend\LICENSE', 'frontend\NOTICE', 'frontend\THIRD_PARTY_NOTICES.md'
 )
 $includeDirs = @(
-  'server', 'scripts', 'manga-ocr', 'docs',
+  'server', 'manga-ocr', 'docs',
   'frontend\apps\extension\dist-chromium',     # ★ 预构建扩展：用户免装 Node
   'frontend\public\models'                      # ★ 扩展运行所需的模型资源（detector.ort 等，约 200MB）
+)
+# scripts\ 只带用户向脚本（白名单）：开发工具已移到 dev\tools\，不进发行包
+$includeFiles += @(
+  'scripts\doctor.cmd', 'scripts\doctor.py', 'scripts\find-ollama.ps1', 'scripts\install_native_host.py',
+  'scripts\start_server.cmd', 'scripts\start_ollama.cmd', 'scripts\stop_server.cmd', 'scripts\stop_ollama.cmd',
+  'scripts\test_ocr.cmd', 'scripts\test_ocr.py'
 )
 if ($IncludeModels)   { $includeDirs += 'models' }                                    # 可选：省用户 400MB 下载
 if ($IncludeLauncher) { $includeFiles += 'run\nm_host_launcher.exe' }                 # 可选：[6/6] 编译失败时兜底
@@ -77,7 +83,7 @@ Write-Host ("zip: " + $zip + "  " + [math]::Round((Get-Item $zip).Length/1MB,1) 
 Write-Host ("SHA256SUMS.txt 已写: " + $hash)
 
 # ── 额外资产：仅模型资源（给源码克隆用户；解压后覆盖到 frontend\\public\\models\\）──
-$modelsSrc = Join-Path $REPO 'frontend\\public\\models'
+$modelsSrc = Join-Path $REPO 'frontend\public\models'
 $modelsZip = Join-Path $ART ("dmbTranslator-" + $ver + "-models.zip")
 if (Test-Path $modelsSrc) {
   if (Test-Path $modelsZip) { Remove-Item $modelsZip -Force }

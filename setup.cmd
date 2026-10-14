@@ -487,7 +487,7 @@ echo.
 echo  想用「本地模型」翻译路线，需要本地有 ollama 与模型：
 echo    （用你已部署的模型即可，无需按名字拉取）
 echo 
-echo    （自定义 Modelfile 见 server\modelfiles\，详见 docs\ARCHITECTURE.md）
+echo    （自定义 Modelfile 见 server\modelfiles\，详见 dev\docs\ARCHITECTURE.md）
 echo.
 echo  Native Messaging 宿主（[6/6] 已自动注册并自校验；手动重跑：
 echo    python scripts\install_native_host.py
