@@ -4,7 +4,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 // 模型资产仍托管在上游仓库的 Release 上，保持原样
-export const DEFAULT_REPO = "DonutShinobu/ShinobuTranslator";
+export const DEFAULT_REPO = "Legumina233/dmbTranslator";
 export const DEFAULT_MODEL_DIR = "public/models";
 export const DEFAULT_MANIFEST = "public/models/models.json";
 export const CHECKSUM_ASSET = "models.sha256";

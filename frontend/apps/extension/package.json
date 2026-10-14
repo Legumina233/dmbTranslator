@@ -1,6 +1,6 @@
 {
   "name": "@dmb/extension",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "license": "GPL-3.0-or-later",
   "private": true,
   "type": "module",
