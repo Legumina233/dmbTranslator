@@ -1,4 +1,4 @@
-# dmbTranslator V2
+# dmbTranslator
 
 > 🚀 面向e-hentai/exhentai网页的 AI 就地翻译工具
 >
@@ -176,7 +176,7 @@ dmbTranslator/
 
 ## 🧩 技术基础
 
-dmbTranslator V2 基于：
+dmbTranslator 基于：
 
 - Chrome / Edge Manifest V3
 - TypeScript
