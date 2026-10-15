@@ -38,14 +38,18 @@ def _ollama_chat(model, messages, ctx, timeout=600, options=None, stop=None):
     拿到的信息与流式完全相同，却少了一整类兼容问题。
     """
     payload = {"model": model, "messages": messages, "stream": False,
-        # ★ 2026-10-12：照上游 ShinobuTranslator 的做法**显式关闭思考**（reasoning/thinking）。
-        #   上游用 reasoning_effort='none' / reasoning_split 表达同一件事，见
-        #   frontend/packages/text-translation/src/llmThinking.ts。
-        #   不关的话，qwen3.5 这类会思考的模型会先吐几千 token 思考过程（真机：273 字输入 →
-        #   3921 token、73 秒），解析失败并把整条管线堵住。
-        "think": False,
                # 关掉 Ollama 默认的静默 5 分钟卸载（默认 -1 永不过期）
                "keep_alive": keep_alive()}
+    # ★ "think" 是**模型类别的策略**，由后端类自己声明（`Backend.think`），共用路径不写死：
+    #   · 通用模型（qwen3.5 等会思考的）→ GenericBackend.think = False
+    #     不关会先吐几千 token 思考过程（真机：273 字输入 → 3921 token / 73 秒），解析失败且堵住管线。
+    #   · Sakura 系 → Backend.think = None（**不发该字段**）
+    #     2026-10-15 实测：对 qwen3 底座的 Sakura 强制 think=false，会让 Ollama 改写模板渲染、
+    #     与 Sakura 官方 prefill 失配 → 模型立刻输出结束标记 → 空译文
+    #     （批量失配后的「带序号重跑」与「逐条兜底」会整批全空 → 旧实现 502 → 扩展重试耗尽）。
+    think = getattr(BACKENDS.get(getattr(ctx, "backend", None)), "think", None)
+    if think is not None:
+        payload["think"] = think
     if options:
         payload["options"] = options
     if stop:
@@ -133,6 +137,9 @@ def _parse_line_list(text, lines):
 
 class Backend:
     name = "base"
+    # 是否向 Ollama 传 "think"：None = 不发该字段（模型自带模板，如 Sakura 系）；
+    # False = 显式关闭思考（会思考的通用模型）。由每个后端类声明，见 _ollama_chat。
+    think = None
 
     def translate_lines(self, lines, ctx):
         raise NotImplementedError
@@ -159,7 +166,10 @@ class SakuraBackend(Backend):
                             options=sakura.OFFICIAL_OPTIONS,
                             stop=sakura.STOP_TOKENS)
         if not text:
-            raise BackendError("Sakura 返回空文本（model={}）".format(ctx.model))
+            # 2026-10-15：单段空返回不再直接炸整页（由 translate_lines 第 3 步决定怎么收口）。
+            # 实测：某段 145 字符的输入稳定只回 1 个字符 → 旧实现抛错 → 服务端 502 →
+            # 扩展重试耗尽 → pipeline.failure.translationUnavailable，整页永远翻不出来。
+            return ""
         return text.strip()
 
     def _try_batch(self, lines, ctx, tagged=False):
@@ -191,17 +201,27 @@ class SakuraBackend(Backend):
         missing = [x for x in expect if x not in ids]
         dup = sorted({i for i in ids if ids.count(i) > 1})
         disordered = ids != [x for x in expect if x in ids]
-        if (missing or dup or unparsed or disordered
-                or len(texts) != len(lines) or any(not t for t in texts)):
-            # 不再重复「批量行数不匹配」这个关键词：上面 plain 那次已经记过，
-            # 一个请求只留一条，避免日后统计失配率时被重复计数。
-            log("  带序号重跑仍不匹配（送入 {} / 返回 {}，缺行 {}，"
-                "重复 {}，未带序号 {}，乱序 {}）".format(
+        # 2026-10-15：这一档的**目的就是"行数不匹配时把已翻好的行救回来"**，
+        # 所以不再因「缺行 / 某行为空」整批作废（那样白跑一轮、再退化到逐行重发 ✗）。
+        # 改为按行号回填：有号且有文本 → 用译文；缺号 / 空 → 留 None（调用方用原文）。
+        # 只有「一行都没救回来」才返回 None（真失败，交给下一档）。
+        filled = [None] * len(lines)
+        for n, t in zip(ids, texts):
+            if isinstance(n, int) and 1 <= n <= len(lines) and t and filled[n - 1] is None:
+                filled[n - 1] = t
+        salvaged = sum(1 for v in filled if v)
+        if not salvaged:
+            log("  带序号重跑仍不匹配（送入 {} / 返回 {}，缺行 {}，重复 {}，"
+                "未带序号 {}，乱序 {}）".format(
                     len(lines), len(ids), missing, dup, len(unparsed), disordered),
                 model=ctx.model)
             return None
-        log("  带序号重跑成功（{} 行，缺行已补回）".format(len(lines)), model=ctx.model)
-        return texts
+        if salvaged != len(lines):
+            log("  带序号重跑部分成功（{} / {} 行；其余 {} 行用原文）".format(
+                salvaged, len(lines), len(lines) - salvaged), model=ctx.model)
+        else:
+            log("  带序号重跑成功（{} 行）".format(len(lines)), model=ctx.model)
+        return filled
 
     def translate_lines(self, lines, ctx):
         """规范化 → 分流（不可译/批量/逐条）→ 逐条显式失败。
@@ -252,14 +272,44 @@ class SakuraBackend(Backend):
                     got = self._try_batch(chunks[0], ctx, tagged=True)
                     if got is not None:
                         for pos, i in enumerate(idxs):
-                            out[i] = got[pos]
+                            if got[pos]:
+                                out[i] = got[pos]
+                            else:
+                                # 2026-10-15：该行没救回来 → 用原文，并标 passthrough
+                                # （不参与 _finalize 的空值断言，整页照常完成）
+                                out[i] = norm[i]
+                                passthrough[i] = True
                         done = True
             if done:
                 return _finalize_all(out, norm, passthrough)
 
         # 3) 逐条（shinobu 原本的兜底：整批 / 带序号重跑都失败时，逐行请求）
+        #
+        # 2026-10-15：个别行模型返回空文本时，**该行按"不可译"原样保留**，不让一行把整页
+        # 打成 502（旧行为：抛错 → app.py 502 → 扩展重试耗尽 → translationUnavailable）。
+        # 但"真故障"仍必须显式失败：若本请求所有待译行都空，照旧抛 BackendError。
+        empty_lines = 0
         for i in pending:
-            out[i] = self._one(norm[i], ctx)
+            value = self._one(norm[i], ctx)
+            if value:
+                out[i] = value
+            else:
+                empty_lines += 1
+                out[i] = norm[i]
+                passthrough[i] = True
+                log("  第 {} 行模型返回空文本 → 原样保留（{} 字）".format(
+                    i + 1, len(norm[i])), model=ctx.model)
+        if empty_lines and empty_lines == len(pending):
+            # 2026-10-15（A2）：整批全空时**不再报错** —— 该页按"全部用原文"正常完成。
+            # 依据：服务端日志显示同一页走「批量」能成功、走「逐条」却每行都空
+            #（第 1..6 行全空），若在此抛错会让整页恒失败 → 502 → 扩展重试耗尽
+            #  → pipeline.failure.translationUnavailable。
+            # 但仍留一条显式 warning，把"疑似模型/参数异常"与"本来就无需翻译"区分开。
+            log("!! 全部待译行均返回空文本 → 整页按原文返回（疑似模型/参数异常，请查上游）",
+                model=ctx.model)
+        elif empty_lines:
+            log("  本请求有 {} 行模型返回空文本（已原样保留）".format(empty_lines),
+                model=ctx.model)
         return _finalize_all(out, norm, passthrough)
 
 
@@ -292,6 +342,8 @@ class GenericBackend(Backend):
     这样避免模型把 UUID / columns 数组也生成出来（v1 实测这会多出近一半 token）。
     """
     name = "generic"
+    # 通用模型（qwen3.5 等）会先吐大段思考过程 → 必须显式关闭（理由见 _ollama_chat 注释）
+    think = False
 
     def translate_lines(self, lines, ctx):
         if not lines:
